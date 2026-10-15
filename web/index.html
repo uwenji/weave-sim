@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WeaveSim Web</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 11c8 0 16 10 24 10M4 21c8 0 16-10 24-10' fill='none' stroke='%232973c7' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M11 4c0 8 10 16 10 24' fill='none' stroke='%23b9a88c' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js",
+               "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js",
+               "three/addons/lines/LineSegments2.js": "./vendor/lines/LineSegments2.js",
+               "three/addons/lines/LineSegmentsGeometry.js": "./vendor/lines/LineSegmentsGeometry.js",
+               "three/addons/lines/LineMaterial.js": "./vendor/lines/LineMaterial.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <header id="statusbar">
+    <span class="brand">WeaveSim</span>
+    <span id="st-units" class="st mono dim2">[mm·N]</span>
+    <span id="st-topo" class="st">no model</span>
+    <span id="st-run" class="st"></span>
+    <span id="st-msg" class="st dim"></span>
+    <button id="st-backend" class="st pill" title="solver backend — click to switch">…</button>
+  </header>
+
+  <aside id="panel">
+    <!-- solve strip: pinned, never folds -->
+    <div id="strip">
+      <div class="row" id="strip-head">
+        <div class="seg small" id="strip-tabs" role="tablist" aria-label="Strip"><button data-tab="solve" aria-pressed="true">Solver</button><button data-tab="disc" aria-pressed="false">Discretisation</button></div>
+        <span class="spacer"></span>
+        <select id="sel-chart" title="what the strip plots">
+          <option value="energy">energy · residual</option>
+          <option value="parts">energy parts</option>
+          <option value="utm">probe force–travel</option>
+        </select>
+      </div>
+      <div id="strip-solve">
+        <div class="row buttons" id="strip-buttons">
+          <button id="btn-run" class="btn primary" title="run / pause (Space)">Run</button>
+          <button id="btn-step" class="btn" title="advance the given number of iterations">Step</button>
+          <input type="number" id="nb-step" class="num sm" min="1" step="100" value="500" title="iterations per Step">
+          <button id="btn-reset" class="btn" title="restart from the woven geometry">Reset</button>
+        </div>
+        <div class="row buttons" id="strip-protocol" role="group" aria-label="fastened-structure protocol">
+          <button id="btn-zero" class="btn proto" title="Zero (fastened-structure protocol, after relaxing): the current geometry becomes the reference (displacement and slip restart from zero) and the solver settles for the given iterations — the drift shows under the chart; then the settled state becomes the reference, the crossings lock and the solver pauses. Add the load and Run: Results › delta is the load displacement. Click while it settles to stop.">Zero</button>
+          <input type="number" id="nb-zero-steps" class="num sm" min="0" step="100" value="1000" title="settle iterations after Zero (0 = lock at once)">
+          <span class="proto-arrow" aria-hidden="true">→</span>
+          <button id="btn-lock" class="btn lock" aria-pressed="false" title="lock every crossing at its current sliding position (fastened joints); click again to let them slide"><span class="led" aria-hidden="true"></span>Lock</button>
+        </div>
+        <div id="chart-legend" class="mono"></div>
+        <canvas id="chart"></canvas>
+        <div id="strip-text" class="readout">no model</div>
+      </div>
+      <div id="strip-disc" hidden>
+        <div class="row buttons">
+          <button id="btn-disc-run" class="btn primary" title="run / pause the joint placement (simulated annealing)">Run</button>
+          <button id="btn-disc-step" class="btn" title="advance the given number of temperature steps">Step</button>
+          <input type="number" id="nb-disc-step" class="num sm" min="1" step="10" value="20" title="temperature steps per Step">
+          <button id="btn-disc-reset" class="btn" title="remove the joints; the next Run starts from equal pieces">Reset</button>
+        </div>
+        <div id="disc-legend" class="mono"><span class="lg c2">current</span><span class="lg c1">best</span><span class="dim">weighted objective per temperature step</span></div>
+        <canvas id="disc-chart"></canvas>
+        <div id="disc-text" class="readout">cuts the laths into stock-length pieces on the current geometry (solved if you ran the solver); results feed the structural objective — 8 Discretisation</div>
+      </div>
+    </div>
+
+    <div id="sections">
+    <details class="sec" id="sec-file" open>
+      <summary><span class="chev"></span><h2>1 File</h2><span class="sum" id="sum-file"></span></summary>
+      <div class="body">
+        <div class="row">
+          <label for="sel-example">example</label>
+          <select id="sel-example"><option value="">—</option></select>
+        </div>
+        <div class="row buttons">
+          <label class="btn file"><input type="file" id="file-scene" accept=".json,.stl,.obj" multiple hidden>Open scene / mesh…</label>
+          <button id="btn-save" class="btn">Save scene</button>
+          <button id="btn-export-results" class="btn">Export results</button>
+          <button id="btn-shot" class="btn">Screenshot</button>
+        </div>
+        <p class="hint">scene.json with its mesh (select both, or drop them on the view); a mesh alone starts a new scene with the defaults. Scenes are the Python program's files — same knot, strand and frame ids.</p>
+        <div class="readout" id="ro-file">—</div>
+        <h3>Rhino</h3>
+        <div class="row buttons"><button id="btn-3dm" class="btn" title="Rhino 7 file + a .3dm.json index of the object ids">Export Rhino .3dm</button><span class="readout inline" id="ro-3dm"></span></div>
+        <details class="sub">
+          <summary>export options</summary>
+          <div class="row" id="x3dm-opts">
+            <label class="check"><input type="checkbox" data-x3dm="pre" checked> model (pre)</label>
+            <label class="check"><input type="checkbox" data-x3dm="result" checked> result</label>
+            <label class="check"><input type="checkbox" data-x3dm="joints" checked> joints</label>
+            <label class="check"><input type="checkbox" data-x3dm="supports" checked> supports &amp; loads</label>
+            <label class="check"><input type="checkbox" data-x3dm="input_mesh" checked> input mesh</label>
+            <label class="check"><input type="checkbox" data-x3dm="nurbs" checked> nurbs</label>
+          </div>
+          <p class="hint">layers by lath group, user text on every object (strand, group, family, values) — the same file the Python program writes. Result layers, diagrams, contact forces and reactions need a solved state.</p>
+        </details>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-weave">
+      <summary><span class="chev"></span><h2>2 Weave</h2><span class="sum" id="sum-weave"></span></summary>
+      <div class="body">
+        <div class="row"><label for="nb-subdiv" class="w">subdivisions / span</label><input type="number" id="nb-subdiv" class="num" min="1" step="1"></div>
+        <div class="row"><label for="nb-overhang" class="w">overhang</label><input type="number" id="nb-overhang" class="num" min="0" step="any"><span class="unit u-len"></span></div>
+        <div class="row"><label for="sel-offset" class="w">knot pre-offset</label><select id="sel-offset"><option value="half_height">half_height</option><option value="none">none</option></select></div>
+        <div class="row"><label for="nb-phase" class="w">seed phase (0/1)</label><input type="number" id="nb-phase" class="num" min="0" max="1" step="1"></div>
+        <div class="row buttons">
+          <button id="btn-regen" class="btn">Regenerate</button>
+          <button id="btn-flipmode" class="btn toggle" title="click laths at crossings to swap over / under">Flip crossings…</button>
+          <button id="btn-clearflips" class="btn">Clear flips</button>
+        </div>
+        <div class="readout" id="ro-weave">—</div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-material">
+      <summary><span class="chev"></span><h2>3 Units &amp; material</h2><span class="sum" id="sum-material"></span></summary>
+      <div class="body">
+        <div class="row">
+          <label for="sel-len">length</label><select id="sel-len"><option>mm</option><option>cm</option><option>m</option></select>
+          <label for="sel-force">force</label><select id="sel-force"><option>N</option><option>kN</option></select>
+        </div>
+        <div class="row" id="row-groups">
+          <label class="check"><input type="checkbox" id="ck-hybrid"> lath groups</label>
+          <span id="grp-ctl" hidden>
+            <label for="nb-ngroups">groups</label><input type="number" id="nb-ngroups" class="num sm" min="1" max="6" step="1">
+            <label for="sel-group">edit</label><select id="sel-group"></select>
+          </span>
+        </div>
+        <div class="row" id="row-grpname" hidden><label for="tx-grpname" class="w">name</label><input type="text" id="tx-grpname" class="txt"></div>
+        <div id="row-assign" hidden>
+          <div class="row buttons">
+            <button id="btn-lathmode" class="btn toggle" title="click laths in the view to add / remove them (Esc leaves)">Select laths…</button>
+            <button id="btn-selgroup" class="btn sm" title="select the laths of the edited group">laths of group</button>
+            <button id="btn-lathclear" class="btn sm">clear</button>
+          </div>
+          <div class="row buttons"><button id="btn-assign" class="btn primary">Assign to group</button><span class="readout inline" id="ro-assign"></span></div>
+        </div>
+        <div class="grid2">
+          <label for="nb-E">E <span class="unit u-stress"></span></label><input type="number" id="nb-E" class="num" step="any" data-bind="material.E">
+          <label for="nb-G">G <span class="unit u-stress"></span></label><input type="number" id="nb-G" class="num" step="any" data-bind="material.G">
+          <label for="nb-rho">density [kg/m³]</label><input type="number" id="nb-rho" class="num" step="any" data-bind="material.density">
+          <label for="nb-w">width X <span class="unit u-len"></span></label><input type="number" id="nb-w" class="num" step="any" data-bind="section.width">
+          <label for="nb-h">height Y <span class="unit u-len"></span></label><input type="number" id="nb-h" class="num" step="any" data-bind="section.height">
+        </div>
+        <details class="sub">
+          <summary>embedment (E90, fc90, H)</summary>
+          <div class="grid2">
+            <label for="nb-E90">E90 ⊥ grain <span class="unit u-stress"></span></label><input type="number" id="nb-E90" class="num" step="any" data-bind="material.E90">
+            <label for="nb-fc90">fc90 crushing <span class="unit u-stress"></span></label><input type="number" id="nb-fc90" class="num" step="any" data-bind="material.fc90">
+            <label for="nb-H">H side hardness <span class="unit u-stress"></span></label><input type="number" id="nb-H" class="num" step="any" data-bind="material.H">
+          </div>
+          <p class="hint">used by the contact-type / pressure layers and the seat law (4 Contact)</p>
+        </details>
+        <details class="sub">
+          <summary>override Ix / Iy / J</summary>
+          <div class="row"><label class="check"><input type="checkbox" id="ck-override"> explicit section constants</label></div>
+          <div class="grid2" id="grid-override">
+            <label for="nb-Ix">Ix (flatwise)</label><input type="number" id="nb-Ix" class="num" step="any">
+            <label for="nb-Iy">Iy (edgewise)</label><input type="number" id="nb-Iy" class="num" step="any">
+            <label for="nb-J">J</label><input type="number" id="nb-J" class="num" step="any">
+          </div>
+        </details>
+        <div class="readout" id="ro-section">—</div>
+        <details class="sub" open>
+          <summary>active beam</summary>
+          <div class="row"><label for="sel-beammode" class="w">mode</label><select id="sel-beammode"><option value="simple">simple</option><option value="advanced">advanced</option></select></div>
+          <div id="beam-simple">
+            <div class="row slider"><label for="sl-act">activation</label><input type="range" id="sl-act" min="0" max="1" step="0.01" data-bind="beam.activation"><output id="out-act" class="mono"></output></div>
+            <div class="row slider"><label for="sl-stiff">stiffness ×</label><input type="range" id="sl-stiff" min="0.1" max="5" step="0.01" data-bind="beam.stiffness"><output id="out-stiff" class="mono"></output></div>
+          </div>
+          <div id="beam-adv" hidden>
+            <div class="row slider"><label for="sl-actf">activation flat</label><input type="range" id="sl-actf" min="0" max="1" step="0.01" data-bind="beam.activation_flat"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-acte">activation edge</label><input type="range" id="sl-acte" min="0" max="1" step="0.01" data-bind="beam.activation_edge"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-actt">activation twist</label><input type="range" id="sl-actt" min="0" max="1" step="0.01" data-bind="beam.activation_twist"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-kf">EIx × (flat)</label><input type="range" id="sl-kf" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_flat"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-ke">EIy × (edge)</label><input type="range" id="sl-ke" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_edge"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-kt">GJ × (twist)</label><input type="range" id="sl-kt" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_twist"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-ka">EA × (axial)</label><input type="range" id="sl-ka" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_axial"><output class="mono"></output></div>
+          </div>
+          <p class="hint">activation 1 = flat rest state (full active bending), 0 = as built (no prestress). Material, beam and loads apply live; section changes rebuild the model.</p>
+        </details>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-contact">
+      <summary><span class="chev"></span><h2>4 Contact</h2><span class="sum" id="sum-contact"></span></summary>
+      <div class="body">
+        <div class="row slider"><label for="sl-mu">μ friction</label><input type="range" id="sl-mu" min="0" max="1" step="0.01" data-bind="contact.mu"><output class="mono"></output></div>
+        <div class="grid2">
+          <label for="nb-str">strength (normal) <span class="unit u-kpen"></span></label><input type="number" id="nb-str" class="num" step="any" data-bind="contact.strength">
+          <label for="nb-stick">stick strength <span class="unit u-kpen"></span></label><input type="number" id="nb-stick" class="num" step="any" data-bind="contact.stick_strength">
+          <label for="nb-tf">torsion factor</label><input type="number" id="nb-tf" class="num" step="any" data-bind="contact.torsion_factor">
+          <label for="nb-eps">epsilon (window) <span class="unit u-len"></span></label><input type="number" id="nb-eps" class="num" step="any" data-bind="contact.epsilon">
+          <label for="nb-ramp">penalty ramp [it]</label><input type="number" id="nb-ramp" class="num" step="1" data-bind="contact.ramp_iter" data-int>
+        </div>
+        <div class="row slider"><label for="sl-slip">slip rate</label><input type="range" id="sl-slip" min="0.05" max="1" step="0.01" data-bind="contact.slip_rate"><output class="mono"></output></div>
+        <div class="row"><label class="check"><input type="checkbox" id="ck-locked" data-bind="contact.locked"> lock all crossings (fastened)</label></div>
+        <div class="row"><label class="check" title="Fn = λ + strength·pen; λ is updated every al_every iterations after the ramp"><input type="checkbox" id="ck-aug" data-bind="contact.augmented"> augmented-Lagrangian gap</label>
+          <label for="nb-alevery">every</label><input type="number" id="nb-alevery" class="num sm" step="1" data-bind="contact.al_every" data-int></div>
+        <details class="sub">
+          <summary>crossing mechanics (W2 / W3)</summary>
+          <div class="row"><label class="check"><input type="checkbox" id="ck-rotf" data-bind="contact.rot_friction"> rotational (scissor) friction</label>
+            <label for="nb-rotf">factor</label><input type="number" id="nb-rotf" class="num sm" step="any" data-bind="contact.rot_factor"></div>
+          <div class="row"><label for="sel-seat" class="w">seat law (dents)</label><select id="sel-seat" data-bind="contact.seat_law"><option value="off">off</option><option value="L1">L1</option></select></div>
+          <div class="row"><label class="check"><input type="checkbox" id="ck-seatgap" data-bind="contact.seat_gap"> dents shorten the gap</label></div>
+          <div class="grid2">
+            <label for="nb-dentrate">dent rate / it</label><input type="number" id="nb-dentrate" class="num" step="any" data-bind="contact.dent_rate">
+            <label for="nb-dentafter">dents after it (−1 auto)</label><input type="number" id="nb-dentafter" class="num" step="1" data-bind="contact.dent_after_iter" data-int>
+            <label for="nb-edgethr">edge threshold</label><input type="number" id="nb-edgethr" class="num" step="0.01" data-bind="contact.edge_threshold">
+          </div>
+          <p class="hint">rotational friction and the seat law apply on Reset. Results › ctype · pressure · util · dent · M_rot</p>
+        </details>
+        <div class="readout" id="ro-contact">—</div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-loads">
+      <summary><span class="chev"></span><h2>5 Loads</h2><span class="sum" id="sum-loads"></span></summary>
+      <div class="body">
+        <div class="row"><label class="check"><input type="checkbox" id="ck-grav"> gravity (self-weight)</label>
+          <label>dir</label><input type="number" id="nb-gx" class="num xs" step="any"><input type="number" id="nb-gy" class="num xs" step="any"><input type="number" id="nb-gz" class="num xs" step="any"></div>
+        <div class="row"><label class="check"><input type="checkbox" id="ck-udl"> UDL</label>
+          <input type="number" id="nb-qx" class="num xs" step="any"><input type="number" id="nb-qy" class="num xs" step="any"><input type="number" id="nb-qz" class="num xs" step="any">
+          <select id="sel-udlper"><option value="length">per length</option><option value="area">per area</option></select></div>
+        <h3>point loads</h3>
+        <div class="readout sel-readout"></div>
+        <div class="row">
+          <select id="sel-loaddir"><option value="world">world vector</option><option value="frame">frame axis</option></select>
+          <span id="load-vec"><input type="number" id="nb-lx" class="num xs" step="any" value="0"><input type="number" id="nb-ly" class="num xs" step="any" value="0"><input type="number" id="nb-lz" class="num xs" step="any" value="-1"></span>
+          <select id="sel-loadaxis" hidden><option value="0">+X (width)</option><option value="1">+Y (normal)</option><option value="2">+Z (tangent)</option><option value="3">−X</option><option value="4">−Y</option><option value="5">−Z</option></select>
+        </div>
+        <div class="row"><label for="nb-lmag">magnitude <span class="unit u-force"></span></label><input type="number" id="nb-lmag" class="num" step="any" value="100">
+          <button id="btn-addload" class="btn">Add to selection</button></div>
+        <div id="list-loads" class="list"></div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-anchors">
+      <summary><span class="chev"></span><h2>6 Anchors</h2><span class="sum" id="sum-anchors"></span></summary>
+      <div class="body">
+        <div class="readout sel-readout"></div>
+        <div class="row buttons"><span class="hint">select</span>
+          <button class="btn sm" id="btn-sel-start">all start frames</button><button class="btn sm" id="btn-sel-end">all end frames</button><button class="btn sm" id="btn-sel-bnd">boundary</button><button class="btn sm" id="btn-sel-clear">clear</button></div>
+        <div class="row" id="fix-dofs"><span class="hint">fix</span>
+          <label class="check"><input type="checkbox" data-dof="0" checked>X</label><label class="check"><input type="checkbox" data-dof="1" checked>Y</label><label class="check"><input type="checkbox" data-dof="2" checked>Z</label>
+          <label class="check"><input type="checkbox" data-dof="3">rX</label><label class="check"><input type="checkbox" data-dof="4">rY</label><label class="check"><input type="checkbox" data-dof="5">rZ</label>
+          <button class="btn sm" id="btn-pin">pin</button><button class="btn sm" id="btn-fixed">fixed</button></div>
+        <div class="row buttons">
+          <button id="btn-addanchor" class="btn">Add for selection</button>
+          <button class="btn sm" data-anchorsel="all_start">all_start</button><button class="btn sm" data-anchorsel="all_end">all_end</button><button class="btn sm" data-anchorsel="boundary">boundary</button>
+        </div>
+        <div id="list-anchors" class="list"></div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-solve">
+      <summary><span class="chev"></span><h2>7 Solve</h2><span class="sum" id="sum-solve"></span></summary>
+      <div class="body">
+        <div class="row">
+          <label>backend</label>
+          <div class="chips inline" id="backend-chips"><button class="chip" data-backend="webgpu">WebGPU</button><button class="chip" data-backend="cpu">CPU f64</button></div>
+          <button id="btn-polish" class="btn sm" title="continue from the current state on the CPU in double precision until the residual is below the tolerance">f64 polish</button>
+        </div>
+        <div class="readout" id="ro-backend">—</div>
+        <div class="grid2">
+          <label for="nb-maxit">max iterations</label><input type="number" id="nb-maxit" class="num" step="100" data-bind="solver.max_iter" data-int>
+          <label for="nb-tol">tolerance</label><input type="number" id="nb-tol" class="num" step="any" data-bind="solver.tol">
+          <label for="nb-every">refresh every</label><input type="number" id="nb-every" class="num" step="1" data-bind="solver.live_every" data-int>
+          <label for="nb-ms">mass scale</label><input type="number" id="nb-ms" class="num" step="any" data-bind="solver.mass_scale">
+          <label for="nb-warm">twist warm-up [it]</label><input type="number" id="nb-warm" class="num" step="1" data-bind="solver.warmup_iter" data-int>
+          <label for="nb-damp">viscous damping</label><input type="number" id="nb-damp" class="num" step="0.01" min="0.5" max="1" data-bind="solver.damping">
+        </div>
+        <div class="row"><label class="check"><input type="checkbox" id="ck-kd" data-bind="solver.kinetic_damping"> kinetic damping</label>
+          <label for="sel-prestress">prestress ref</label><select id="sel-prestress" data-bind="solver.prestress"><option value="flat">flat</option><option value="asbuilt">asbuilt</option></select></div>
+        <p class="hint">fastened-structure protocol (relax → Zero → Lock → add the load → Run → Results › delta): in the strip, under Run</p>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-disc">
+      <summary><span class="chev"></span><h2>8 Discretisation</h2><span class="sum" id="sum-disc"></span></summary>
+      <div class="body">
+        <p class="hint">joint placement along the laths by simulated annealing (Python: discretize.py) — Run / Step / Reset in the strip's Discretisation tab. The cuts sit on the current geometry; with a solve the structural objective keeps joints away from high moments.</p>
+        <div class="grid2">
+          <label for="nb-dmax">stock length <span class="unit u-len"></span></label><input type="number" id="nb-dmax" class="num" step="any" data-disc="max_length">
+          <label for="nb-djoint">joint length <span class="unit u-len"></span></label><input type="number" id="nb-djoint" class="num" step="any" data-disc="joint_length">
+          <label for="nb-dextra">extra joints / strand</label><input type="number" id="nb-dextra" class="num" step="1" min="0" data-disc="extra_joints" data-int>
+        </div>
+        <details class="sub">
+          <summary>annealing</summary>
+          <div class="grid2">
+            <label for="nb-diter">temperature steps</label><input type="number" id="nb-diter" class="num" step="10" min="1" data-disc="iterations" data-int>
+            <label for="nb-dmll">neighbours / step</label><input type="number" id="nb-dmll" class="num" step="10" min="1" data-disc="mll" data-int>
+            <label for="nb-dtemp">initial temperature</label><input type="number" id="nb-dtemp" class="num" step="any" data-disc="initial_temp">
+            <label for="nb-dcool">cooling</label><input type="number" id="nb-dcool" class="num" step="0.001" data-disc="cooling">
+            <label for="nb-dseed">seed</label><input type="number" id="nb-dseed" class="num" step="1" data-disc="seed" data-int>
+          </div>
+        </details>
+        <h3>objective weights (0 … 1)</h3>
+        <div id="disc-weights"></div>
+        <canvas id="disc-comp" class="plot sm"></canvas>
+        <canvas id="disc-pieces" class="plot sm"></canvas>
+        <h3>joints</h3>
+        <div class="row buttons"><span class="readout inline" id="ro-joints">none</span><span class="spacer"></span><button id="btn-joints-csv" class="btn sm" disabled>export joints (csv)</button></div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-utm">
+      <summary><span class="chev"></span><h2>9 UTM test</h2><span class="sum" id="sum-utm"></span></summary>
+      <div class="body">
+        <div class="row buttons"><button id="btn-probemode" class="btn toggle">Pick probe…</button><span class="readout inline" id="ro-probe">no probe</span></div>
+        <div class="row"><label>axis</label><input type="number" id="nb-ax" class="num xs" step="any" value="0"><input type="number" id="nb-ay" class="num xs" step="any" value="0"><input type="number" id="nb-az" class="num xs" step="any" value="-1"></div>
+        <div class="row buttons"><label class="btn file"><input type="file" id="file-utm" accept=".csv,.txt" hidden>Open UTM csv…</label>
+          <span class="readout inline" id="ro-utmfile">no curve</span></div>
+        <div class="row"><label for="sel-utmforce">force col</label><select id="sel-utmforce"></select><label for="sel-utmdisp">travel col</label><select id="sel-utmdisp"></select></div>
+        <div class="row"><label for="sel-utmfu">file units</label><select id="sel-utmfu"><option>N</option><option>kN</option></select><select id="sel-utmlu"><option>mm</option><option>cm</option><option>m</option></select></div>
+        <h3>replay on the model</h3>
+        <div class="grid2" id="grid-replay"></div>
+        <div class="row buttons"><button id="btn-replay" class="btn primary">Replay test</button><button id="btn-replay-stop" class="btn" disabled>Stop</button></div>
+        <canvas id="utm-plot" class="plot"></canvas>
+        <div class="readout" id="ro-utm">—</div>
+      </div>
+    </details>
+
+    <details class="sec" id="sec-calib">
+      <summary><span class="chev"></span><h2>10 Calibration</h2><span class="sum" id="sum-calib"></span></summary>
+      <div class="body" id="calib-body"></div>
+    </details>
+
+    </div>
+  </aside>
+
+  <main id="viewport">
+    <canvas id="gl"></canvas>
+    <div id="labels" aria-hidden="true"></div>
+    <div id="nav" aria-label="view navigation">
+      <button class="nb" id="nav-home" title="Home view (H)"><svg viewBox="0 0 16 16"><path d="M2.5 8.5 8 3.5l5.5 5M4 7.3V13h8V7.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg></button>
+      <button class="nb arrow" id="nav-up" title="Roll the model up 90°"><svg viewBox="0 0 16 16"><path d="M8 3.5 12.5 11.5h-9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+      <button class="nb" id="nav-turn" title="Turntable (T)"><svg viewBox="0 0 16 16"><path d="M12.3 8.6A4.4 4.4 0 1 1 11.1 5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.4 5.2 8.3 4.6l1.7-2.3z" fill="currentColor"/></svg></button>
+      <button class="nb arrow" id="nav-left" title="Roll the model left 90°"><svg viewBox="0 0 16 16"><path d="M3.5 8 11.5 3.5v9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+      <canvas id="navcube" width="112" height="112"></canvas>
+      <button class="nb arrow" id="nav-right" title="Roll the model right 90°"><svg viewBox="0 0 16 16"><path d="M12.5 8 4.5 3.5v9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+      <button class="nb" id="nav-fit" title="Fit the model in the view (F)"><svg viewBox="0 0 16 16"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg></button>
+      <button class="nb arrow" id="nav-down" title="Roll the model down 90°"><svg viewBox="0 0 16 16"><path d="M8 12.5 3.5 4.5h9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+      <button class="nb" id="nav-proj" title="Perspective — click for orthographic (P)"><svg viewBox="0 0 16 16" class="ic-persp"><path d="M3 13 5.6 3h4.8L13 13z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg><svg viewBox="0 0 16 16" class="ic-ortho" hidden><path d="M3.5 3.5h9v9h-9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></button>
+    </div>
+    <div id="legend" hidden><div id="legend-title" class="mono"></div><div id="legend-bar"></div><div id="legend-ticks" class="mono"><span id="legend-lo"></span><span id="legend-mid"></span><span id="legend-hi"></span></div></div>
+    <div id="mode-banner" hidden></div>
+    <div id="tooltip" hidden></div>
+    <div id="drop" hidden>drop scene.json + mesh, a mesh, a UTM csv or calibration files</div>
+  </main>
+
+  <!-- display tools: a sidebar at the side of the view that folds to a narrow tab (the Joint FEA idiom) -->
+  <aside id="display">
+    <div id="display-head">
+      <button id="display-toggle" title="show / hide the display tools"><span class="chev"></span><span class="t">Display</span></button>
+      <button id="display-dock" class="nbtn" title="move the sidebar to the other side of the view">⇄</button>
+    </div>
+    <div class="body">
+      <h2>Colour</h2>
+      <div class="row"><label for="sel-colour" class="w">laths by</label>
+        <select id="sel-colour">
+          <optgroup label="laths"><option value="family">family</option><option value="plain">pure colour</option><option value="overunder">over / under</option><option value="pieces">pieces (joints)</option><option value="group">lath group</option><option value="strand">strand</option></optgroup>
+          <optgroup label="segments"><option value="Mx">Mx flatwise moment</option><option value="My">My edgewise moment</option><option value="T">T torsion</option><option value="N">N axial (+tension)</option></optgroup>
+          <optgroup label="crossings"><option value="Fn">Fn contact normal force</option><option value="Ft">Ft tangential force</option><option value="slip">slip</option><option value="state">stick / slip</option><option value="gap">gap</option><option value="pressure">pressure (nominal)</option><option value="util">embedment utilisation</option><option value="ctype">contact type FF/FE/EE</option><option value="dent">seat depth (dent)</option><option value="M_rot">scissor moment M_rot</option><option value="theta">crossing angle θ</option><option value="lambda">AL multiplier λ</option></optgroup>
+          <optgroup label="nodes"><option value="disp">displacement |u|</option></optgroup>
+        </select></div>
+      <div class="row" id="row-purecolour" hidden><label for="in-purecolour" class="w">colour</label><input type="color" id="in-purecolour" value="#cca875"></div>
+      <div id="layer-ctl">
+        <div class="row"><label for="sel-palette" class="w">palette</label><select id="sel-palette"><option value="default">default</option><option>viridis</option><option>magma</option><option>plasma</option><option>inferno</option><option>cividis</option><option>RdBu</option><option>PuOr</option><option>blues</option><option>turbo</option></select></div>
+        <div class="row"><label class="check" title="node values (segments averaged) interpolated along each lath; off: one colour per segment"><input type="checkbox" id="ck-smooth" checked> smooth</label>
+          <label class="check" title="ten colour bands instead of a smooth scale"><input type="checkbox" id="ck-bands"> bands</label>
+          <label class="check"><input type="checkbox" id="ck-delta"> delta</label></div>
+        <div class="row"><label class="check"><input type="checkbox" id="ck-autorange" checked> auto range</label>
+          <input type="number" id="nb-vmin" class="num sm" step="any" disabled><input type="number" id="nb-vmax" class="num sm" step="any" disabled></div>
+      </div>
+
+      <h2>Diagram</h2>
+      <div class="chips" id="diag-chips"></div>
+      <div id="diag-ctl" hidden>
+        <div class="row slider"><label for="sl-dscale">scale</label><input type="range" id="sl-dscale" min="0.1" max="5" step="0.05" value="1"><output id="out-dscale" class="mono">1.00</output></div>
+        <div class="row slider" id="row-dfill"><label for="sl-dfill">fill</label><input type="range" id="sl-dfill" min="0.05" max="1" step="0.05" value="0.35"><output id="out-dfill" class="mono">0.35</output></div>
+        <div class="row"><label for="sel-dlabels" class="w">labels</label><select id="sel-dlabels"><option value="0">no labels</option><option value="1" selected>extremes</option><option value="2">per strand</option></select></div>
+        <div class="readout" id="ro-diagram"></div>
+      </div>
+      <div id="joint-ctl" hidden>
+        <div class="row"><label class="check"><input type="checkbox" id="ck-zone"> diagram around joints only</label></div>
+        <div class="row slider" id="row-zone" hidden><label for="sl-zone">± crossings</label><input type="range" id="sl-zone" min="1" max="6" step="1" value="3"><output id="out-zone" class="mono">3</output></div>
+      </div>
+
+      <h2>Extremes</h2>
+      <div class="readout" id="ro-extremes">no results yet</div>
+      <div class="row buttons"><button id="btn-refresh-results" class="btn sm">Refresh</button><span class="readout inline" id="sum-results"></span></div>
+
+      <h2>View</h2>
+      <div class="row"><label>theme</label>
+        <div class="chips inline" id="theme-chips"><button class="chip on" data-theme="auto">auto</button><button class="chip" data-theme="light">light</button><button class="chip" data-theme="dark">dark</button></div></div>
+      <div class="chips" id="layer-chips">
+        <button class="chip on" data-layer="laths">laths</button><button class="chip" data-layer="lines">centrelines</button><button class="chip on" data-layer="knots">knots</button>
+        <button class="chip on" data-layer="mesh">mesh</button><button class="chip" data-layer="wire">wire</button><button class="chip on" data-layer="shadow">shadow</button>
+        <button class="chip on" data-layer="joints">joints</button><button class="chip on" data-layer="loads">loads</button><button class="chip on" data-layer="anchors">anchors</button>
+        <button class="chip on" data-layer="probes">probes</button><button class="chip" data-layer="frames">frames</button>
+      </div>
+      <div class="row slider"><label for="sl-deform">deformation ×</label><input type="range" id="sl-deform" min="0" max="50" step="0.5" value="1"><output id="out-deform" class="mono">1</output></div>
+      <div class="row slider"><label for="sl-arrow">arrow scale</label><input type="range" id="sl-arrow" min="0.2" max="4" step="0.1" value="1"><output id="out-arrow" class="mono">1.0</output></div>
+      <div class="row slider"><label for="sl-turn">turntable °/s</label><input type="range" id="sl-turn" min="1" max="60" step="1" value="12"><output id="out-turn" class="mono">12</output></div>
+      <div class="row"><label for="sel-knotpick" class="w">knot dot picks</label><select id="sel-knotpick"><option value="over">over strand</option><option value="under">under strand</option></select></div>
+      <p class="hint">click a lath next to a crossing to select that frame (shift adds / removes) · Esc clears · hover a crossing for its forces · drag: orbit · right-drag: pan · wheel: zoom · keys H F T P, Space runs</p>
+    </div>
+  </aside>
+</div>
+
+<div id="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head"><span id="modal-title">Export</span><button id="modal-close" class="btn">Close</button></div>
+    <p class="hint" id="modal-hint"></p>
+    <textarea id="modal-text" spellcheck="false"></textarea>
+    <div class="row buttons"><button id="modal-copy" class="btn primary">Copy</button><a id="modal-download" class="btn" download="export.json">Download</a></div>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

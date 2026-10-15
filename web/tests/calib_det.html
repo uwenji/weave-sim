@@ -1,0 +1,38 @@
+<!doctype html><html><body><pre id="out"></pre>
+<script type="module">
+// determinism of the batched GPU objective: a parameter vector gives bit-identical replays in any batch composition
+import { CalibrationSet, FileResolver } from '../js/calibrate.js';
+import { getDevice } from '../js/solver_gpu.js';
+const log = (s) => { console.log(s); document.getElementById('out').textContent += s + '\n'; };
+(async () => {
+  try {
+    const base = new URL('/examples/calibration/force/calib.json', location.href);
+    const calib = await (await fetch(base)).json();
+    Object.assign(calib.replay, { relax_iter: 300, step_iter: 60, avg_iter: 20, n_steps: 2, cycles: 1 });
+    const q = new URLSearchParams(location.search);
+    if (q.get('replicas')) Object.assign(calib.replay, { replicas: +q.get('replicas'), replica_stage: q.get('stage') || 'relax' });
+    const cs = await CalibrationSet.load(calib, new FileResolver({ base }));
+    cs.setBackend('gpu', await getDevice());
+    if (q.get('replicas')) {
+      const a = { mu: 0.35, torsion_factor: 1, strength: 1e4, stick_strength: 1e4, activation: 1, pad_stiffness: 0 };
+      let t0 = performance.now();
+      const [g] = await cs.objectiveBatch([a]);
+      log(`GPU replicas ${calib.replay.replicas} (${calib.replay.replica_stage}): objective ${g.objective.toFixed(4)} ± ${g.objectiveStd.toFixed(4)}  per replica ${g.replicas.map(r => cs.objectiveOf(cs.residuals(r)).toFixed(4)).join(' ')}  (${((performance.now() - t0) / 1000).toFixed(0)} s)`);
+      cs.setBackend('cpu'); t0 = performance.now();
+      const [c] = await cs.objectiveBatch([a]);
+      log(`CPU replicas: objective ${c.objective.toFixed(4)} ± ${c.objectiveStd.toFixed(4)}  per replica ${c.replicas.map(r => cs.objectiveOf(cs.residuals(r)).toFixed(4)).join(' ')}  (${((performance.now() - t0) / 1000).toFixed(0)} s)`);
+      window.__done = true; return;
+    }
+    const a = { mu: 0.35, torsion_factor: 1, strength: 1e4, stick_strength: 1e4, activation: 1, pad_stiffness: 0 }, b = { ...a, mu: 0.5, activation: 0.7 }, c = { ...a, strength: 3e4 };
+    let t0 = performance.now();
+    const r1 = await cs.objectiveBatch([a, b]); log(`[a, b] ${((performance.now() - t0) / 1000).toFixed(0)} s`);
+    const r2 = await cs.objectiveBatch([c, b, a]); log(`[c, b, a]`);
+    const r3 = await cs.objectiveBatch([a]); log(`[a]`);
+    const same = (x, y) => JSON.stringify(x.sims) === JSON.stringify(y.sims);
+    log(`a: ${r1[0].objective} | ${r2[2].objective} | ${r3[0].objective}  → ${same(r1[0], r2[2]) && same(r1[0], r3[0]) ? 'bit-identical in all batches' : 'DIFFERENT'}`);
+    log(`b: ${r1[1].objective} | ${r2[1].objective}  → ${same(r1[1], r2[1]) ? 'bit-identical' : 'DIFFERENT'}`);
+    log(`c: ${r2[0].objective}`);
+  } catch (e) { log('ERROR ' + e.message + '\n' + e.stack); }
+  window.__done = true;
+})();
+</script></body></html>

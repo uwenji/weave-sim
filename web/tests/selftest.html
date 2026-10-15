@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeaveSim Self-test</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  body { overflow: auto; padding: 18px 22px; } pre { font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; }
+  .card { max-width: 1100px; } h1 { font-size: 16px; font-weight: 600; margin: 0 0 6px; color: var(--accent); }
+</style></head>
+<body><div class="card">
+<h1>WeaveSim Web — self-test &amp; benchmark</h1>
+<p class="hint">Columns: iterations CPU / GPU, residual CPU / GPU, the largest position difference against the largest
+displacement, the largest moment difference against the largest moment (f32 level ≈ 1e-7 … 1e-4 at a 1e-4 tolerance).
+Runs the solver validation cases on the CPU (f64 reference) and on WebGPU, checks that a GPU run is bit-reproducible,
+and measures the batched throughput (instances × iterations per second). Takes 1–3 minutes on a laptop GPU. Copy the text
+below into the chat when something looks off.</p>
+<div class="row buttons"><button id="go" class="btn primary">Run</button><label class="check"><input type="checkbox" id="quick"> quick</label><button id="copy" class="btn">Copy report</button></div>
+<pre id="out">press Run</pre>
+</div>
+<script type="module">
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+const out = document.getElementById('out'), lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const rel = (a, b) => { let m = 0, s = 0; for (let i = 0; i < a.length; i++) { m = Math.max(m, Math.abs(a[i] - b[i])); s = Math.max(s, Math.abs(b[i])); } return s ? m / s : m; };
+const BASE = new URL('../../examples', location.href).href;
+async function runGpu(gpu, n) { let done = 0; while (done < n) { const k = Math.min(1000, n - done); const c = await gpu.step(k, { force: false }); done += k; if (c.every(x => x.done)) break; } }
+async function main() {
+  lines.length = 0;
+  const quick = document.getElementById('quick').checked;
+  log(`${new Date().toISOString()}  ${navigator.userAgent}`);
+  const dev = await getDevice();
+  if (!dev) { log('no WebGPU adapter (secure context? localhost or https) — only the CPU solver is available'); return; }
+  const info = dev.wsInfo || {};
+  log(`adapter: ${info.vendor || '?'} · ${info.architecture || '?'} · ${info.device || ''} ${info.description || ''}`);
+  log(`limits: maxStorageBufferBindingSize ${(dev.limits.maxStorageBufferBindingSize / 2 ** 20).toFixed(0)} MiB · maxComputeWorkgroupsPerDimension ${dev.limits.maxComputeWorkgroupsPerDimension}`);
+  log('\n1 · precision: GPU (f32 + 64-bit fixed point) against the CPU f64 reference');
+  const cases = quick ? ['cantilever', 'cross_stick', 'cross_slip', 'v5dome_cm'] : ['cantilever', 'cantilever_edge', 'torsion', 'cross_stick', 'cross_slip', 'cross_locked', 'cross_w23', 'v5dome_cm'];
+  // converging cases run to the tolerance; the slipping crossing never converges by design (the pull exceeds μ·Fn):
+  // it is compared after 1200 iterations, before the stick–slip dynamics separate f64 runs of any kind
+  const N = { cantilever: 12000, cantilever_edge: 6000, torsion: 3000, cross_stick: 8000, cross_slip: 1200, cross_locked: 4000, cross_w23: 6000, v5dome_cm: 1500 };
+  for (const name of cases) {
+    try {
+      const { sc, topo, contacts } = await caseByName(name, BASE);
+      const n = N[name] || 2000;
+      const cpu = new CpuSolver(sc, topo, { contacts }); const t0 = performance.now(); cpu.run(n); const tc = performance.now() - t0;
+      const model = new CpuSolver(sc, topo, { contacts }); const gpu = new GpuSolver(dev, [model]);
+      const msgs = await gpu.compileInfo(); if (msgs.some(m => m.startsWith('error'))) { log(`${name}: shader errors\n${msgs.join('\n')}`); return; }
+      const t1 = performance.now(); await runGpu(gpu, n); await gpu.download(0); const tg = performance.now() - t1;
+      const st = cpu.st, sg = model.st, rc = cpu.results(), rg = model.results();
+      let dX = 0, disp = 0, size = 0; for (let i = 0; i < st.X.length; i++) { dX = Math.max(dX, Math.abs(st.X[i] - sg.X[i])); disp = Math.max(disp, Math.abs(st.X[i] - st.X0[i])); size = Math.max(size, Math.abs(st.X[i])); }
+      // moments: the largest difference over Mx, My, T against the largest moment (a single component can be ~0)
+      let dM = 0, Mmax = 0; for (const k of ['Mx', 'My', 'T']) for (let j = 0; j < rc.segment[k].length; j++) { dM = Math.max(dM, Math.abs(rg.segment[k][j] - rc.segment[k][j])); Mmax = Math.max(Mmax, Math.abs(rc.segment[k][j])); }
+      let s = `${name.padEnd(14)} it ${String(st.iteration).padStart(5)}/${String(sg.iteration).padStart(5)}  residual ${st.residual.toExponential(2)}/${sg.residual.toExponential(2)}  |ΔX|/|u| ${(dX / Math.max(disp, 1e-9 * size, 1e-30)).toExponential(1)}  |ΔM|/|M| ${(dM / Math.max(Mmax, 1e-30)).toExponential(1)}`;
+      if (contacts && cpu.contact && st.K === 1) s += `  Fn ${cpu.contact.Fn[0].toFixed(4)}/${model.contact.Fn[0].toFixed(4)}  slip ${st.slip[0].toFixed(4)}/${sg.slip[0].toFixed(4)}${name === 'cross_slip' ? ' (slipping, 1200 it)' : ''}`;
+      s += `  (${tc.toFixed(0)} ms cpu · ${tg.toFixed(0)} ms gpu)`;
+      log(s); gpu.dispose();
+    } catch (e) { log(`${name}: ERROR ${e.message}`); }
+  }
+  log('\n2 · reproducibility: the same model twice on the GPU');
+  try {
+    const { sc, topo } = await caseByName('v5dome_cm', BASE);
+    const runs = [];
+    for (let r = 0; r < 2; r++) { const m = new CpuSolver(sc, topo); const g = new GpuSolver(dev, [m]); await runGpu(g, 800); await g.download(0); runs.push(Float64Array.from(m.st.X)); g.dispose(); }
+    let same = true; for (let i = 0; i < runs[0].length; i++) if (runs[0][i] !== runs[1][i]) { same = false; break; }
+    log(same ? 'v5dome_cm 800 iterations: bit-identical positions' : 'v5dome_cm: runs DIFFER (unexpected — please report)');
+  } catch (e) { log('reproducibility: ERROR ' + e.message); }
+  log('\n3 · throughput: instances of one model in the same dispatches (calibration batches)');
+  for (const name of quick ? ['v5dome_cm'] : ['v5dome_cm', 'dualv5dome_cm']) {
+    try {
+      const { sc, topo } = await caseByName(name, BASE);
+      const cpu = new CpuSolver(sc, topo); cpu.step(20); let t0 = performance.now(); cpu.step(200); const cpuIt = 200 / ((performance.now() - t0) / 1000);
+      const st = cpu.st;
+      let row = `${name.padEnd(14)} ${st.n} nodes · ${st.m} segments · ${st.K} crossings   CPU f64 ${cpuIt.toFixed(0)} it/s   GPU:`;
+      for (const B of quick ? [1, 16] : [1, 4, 16, 64]) {
+        const models = Array.from({ length: B }, () => new CpuSolver(sc, topo));
+        const g = new GpuSolver(dev, models, { perSubmit: 64 });
+        await runGpu(g, 64);
+        const n = 384; t0 = performance.now(); await g.step(n, { force: false }); const dt = (performance.now() - t0) / 1000;
+        row += `  B=${B} ${(n / dt).toFixed(0)} it/s (${(B * n / dt).toFixed(0)} inst·it/s)`;
+        g.dispose();
+      }
+      log(row);
+    } catch (e) { log(`${name}: ERROR ${e.message}`); }
+  }
+  log('\ndone');
+}
+document.getElementById('go').onclick = () => { document.getElementById('go').disabled = true; main().finally(() => { document.getElementById('go').disabled = false; window.__done = true; }); };
+document.getElementById('copy').onclick = () => navigator.clipboard?.writeText(lines.join('\n'));
+if (new URLSearchParams(location.search).has('auto')) document.getElementById('go').click();
+</script></body></html>

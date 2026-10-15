@@ -1,0 +1,62 @@
+<!doctype html><html><body><pre id="out"></pre>
+<script type="module">
+// isolate the GPU replay: (A) CPU relax + CPU replay, (B) CPU relax + GPU replay, (C) GPU relax + CPU replay — P1 only
+import { CalibrationSet, FileResolver, applyParams, runAsync, replayForce, probeNode } from '../js/calibrate.js';
+import { CpuSolver, deepClone } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+const q = new URLSearchParams(location.search), only = q.get('test') || 'P1';
+const log = (s) => { console.log(s); document.getElementById('out').textContent += s + '\n'; };
+const fmtc = (br) => br.map(b => `c${b.cycle} ${b.branch.padEnd(6)} ${b.d.map(v => v.toFixed(4)).join(' ')}`).join('\n');
+async function gpuReplay(dev, relaxed, job, t, cs, scales) {
+  const r = relaxed.clone(); r.rebuildGoals();
+  r.protocol = { mode: 1, probe: probeNode(r.st, t.probe), sched: job.sched, settle: job.settle, avg: job.avg, axis: t.probe.axis, kPad: 0 };
+  const g = new GpuSolver(dev, [r], { scales });
+  const total = job.sched.length * (job.settle + job.avg) + 2;
+  let done = 0;
+  while (done < total + 400) { const ctl = await g.step(400, { force: false }); done += 400; if (ctl[0].done === 1) break; }
+  const o = (await g.readAllOutputs())[0]; g.dispose();
+  let k = 0, dPrev = 0, fPrev = 0; const br = [];
+  for (const [c, branch, Fs] of job.seq) { const ds = [dPrev], fs = [fPrev]; for (const F of Fs) { ds.push(o[4 * k]); fs.push(F); k++; } dPrev = ds.at(-1); fPrev = fs.at(-1); br.push({ cycle: c, branch, d: ds, f: fs }); }
+  return br;
+}
+(async () => {
+  try {
+    const base = new URL('/examples/calibration/force/calib.json', location.href);
+    const calib = await (await fetch(base)).json();
+    const cs = await CalibrationSet.load(calib, new FileResolver({ base }));
+    const dev = await getDevice();
+    const truth = await (await fetch(new URL('synthetic_truth.json', base))).json();
+    const vals = Object.fromEntries(cs.names().map(k => [k, truth[k]])); vals.pad_stiffness = 0;
+    const t = cs.tests.concat(cs.validation).find(x => x.name === only), rp = cs.replay;
+    cs.setBackend('gpu', dev);
+    const scales = cs._gpuScales([t]);
+    log(`scales ${JSON.stringify(scales)}`);
+    // CPU relax
+    const sc = deepClone(cs.scene); applyParams(sc, vals);
+    const sv = new CpuSolver(sc, cs.topo); await runAsync(sv, rp.relax_iter); sv.internalize();
+    log(`CPU relax: it ${sv.st.iteration} residual ${sv.st.residual.toExponential(3)}`);
+    const job = cs._jobs(vals, [t], sc)[0];
+    let t0 = performance.now();
+    const A = await replayForce(sv, t.probe, job.forces, rp.cycles, rp.step_iter, rp.avg_iter, 0);
+    log(`(A) CPU relax + CPU replay  residual ${cs.residualCycles(t, A).toFixed(4)}  (${((performance.now() - t0) / 1000).toFixed(0)} s)\n${fmtc(A)}`);
+    t0 = performance.now();
+    const B = await gpuReplay(dev, sv, job, t, cs, scales);
+    log(`(B) CPU relax + GPU replay  residual ${cs.residualCycles(t, B).toFixed(4)}  (${((performance.now() - t0) / 1000).toFixed(0)} s)\n${fmtc(B)}`);
+    if (q.get('gpurelax') !== '0') {
+      const sc2 = deepClone(cs.scene); applyParams(sc2, vals);
+      const md = new CpuSolver(sc2, cs.topo);
+      const g = new GpuSolver(dev, [md], { scales });
+      let done = 0, first = true;
+      while (done < rp.relax_iter) { const k = Math.min(500, rp.relax_iter - done); const ctl = await g.step(k, { force: first }); first = false; done += k; if (ctl[0].done) break; }
+      await g.downloadAll(null, { history: false, rebase: false }); g.dispose();
+      md.internalize();
+      let dx = 0; for (let i = 0; i < md.st.X.length; i++) dx = Math.max(dx, Math.abs(md.st.X[i] - sv.st.X[i]));
+      let du = 0; for (let i = 0; i < md.st.u.length; i++) du = Math.max(du, Math.abs(md.st.u[i] - sv.st.u[i]));
+      log(`GPU relax: it ${md.st.iteration} residual ${md.st.residual.toExponential(3)}  max|X_gpu − X_cpu| ${dx.toExponential(2)}  max|u diff| ${du.toExponential(2)}  stuck diff ${md.st.stuck.reduce((a, v, i) => a + (v !== sv.st.stuck[i]), 0)}`);
+      const C = await replayForce(md, t.probe, job.forces, rp.cycles, rp.step_iter, rp.avg_iter, 0);
+      log(`(C) GPU relax + CPU replay  residual ${cs.residualCycles(t, C).toFixed(4)}\n${fmtc(C)}`);
+    }
+  } catch (e) { log('ERROR ' + e.message + '\n' + e.stack); }
+  window.__done = true;
+})();
+</script></body></html>

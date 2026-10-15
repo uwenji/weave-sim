@@ -1,0 +1,19 @@
+one-at-a-time sweep around {'mu': 0.35, 'torsion_factor': 1.0, 'strength': 10000.0, 'stick_strength': 10000.0, 'activation': 1.0, 'pad_stiffness': 0.0}
+  mu = 0.15  objective 0.7756  P1:0.287  P2:0.319  P3:0.169
+  mu = 0.475  objective 0.5355  P1:0.174  P2:0.204  P3:0.158
+  mu = 0.8  objective 0.5703  P1:0.156  P2:0.096  P3:0.319
+  torsion_factor = 0.3  objective 1.4375  P1:0.181  P2:0.486  P3:0.770
+  torsion_factor = 1.225  objective 0.8602  P1:0.287  P2:0.197  P3:0.376
+  torsion_factor = 5  objective 0.8011  P1:0.304  P2:0.162  P3:0.335
+  strength = 3000  objective 0.2744  P1:0.057  P2:0.043  P3:0.175
+  strength = 1.225e+04  objective 0.5447  P1:0.183  P2:0.131  P3:0.231
+  strength = 5e+04  objective 0.9764  P1:0.273  P2:0.281  P3:0.422
+  stick_strength = 2000  objective 0.6918  P1:0.253  P2:0.104  P3:0.335
+  stick_strength = 1e+04  objective 0.6647  P1:0.250  P2:0.168  P3:0.247
+  stick_strength = 5e+04  objective 0.6104  P1:0.248  P2:0.047  P3:0.315
+  activation = 0.2  objective 2.4165  P1:0.192  P2:0.788  P3:1.437
+  activation = 0.6  objective 0.4990  P1:0.212  P2:0.090  P3:0.197
+  activation = 1  objective 0.6439  P1:0.250  P2:0.157  P3:0.236
+  pad_stiffness = 500  objective 2.3169  P1:0.807  P2:0.749  P3:0.761
+  pad_stiffness = 3162  objective 0.4946  P1:0.087  P2:0.235  P3:0.173
+  pad_stiffness = 2e+04  objective 0.6135  P1:0.224  P2:0.168  P3:0.221

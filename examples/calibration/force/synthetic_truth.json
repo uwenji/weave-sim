@@ -1,0 +1,8 @@
+{
+ "mu": 0.35,
+ "torsion_factor": 1.0,
+ "strength": 10000.0,
+ "stick_strength": 10000.0,
+ "activation": 1.0,
+ "pad_stiffness": 0.0
+}

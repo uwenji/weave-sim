@@ -1,0 +1,13 @@
+one-at-a-time sweep around {'E': 1000000.0, 'activation': 1.0, 'pad_stiffness': 0.0}
+  E = 3e+05  objective 0.3994  P1:0.147  P2:0.170  P3:0.082
+  E = 6.463e+05  objective 0.3363  P1:0.028  P2:0.114  P3:0.195
+  E = 1.392e+06  objective 1.1943  P1:0.345  P2:0.418  P3:0.431
+  E = 3e+06  objective 2.4977  P1:0.835  P2:0.981  P3:0.682
+  activation = 0.2  objective 1.0980  P1:0.177  P2:0.611  P3:0.310
+  activation = 0.4667  objective 1.0348  P1:0.255  P2:0.559  P3:0.221
+  activation = 0.7333  objective 0.7586  P1:0.191  P2:0.251  P3:0.317
+  activation = 1  objective 0.7756  P1:0.175  P2:0.274  P3:0.326
+  pad_stiffness = 500  objective 1.1416  P1:0.416  P2:0.381  P3:0.345
+  pad_stiffness = 1710  objective 0.3976  P1:0.167  P2:0.160  P3:0.071
+  pad_stiffness = 5848  objective 0.2961  P1:0.045  P2:0.124  P3:0.127
+  pad_stiffness = 2e+04  objective 0.6453  P1:0.134  P2:0.242  P3:0.269

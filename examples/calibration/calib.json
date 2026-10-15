@@ -1,0 +1,88 @@
+{
+ "scene": "dome_calib_scene.json",
+ "params": {
+  "E": [
+   300000.0,
+   3000000.0
+  ],
+  "activation": [
+   0.2,
+   1.0
+  ],
+  "pad_stiffness": [
+   500,
+   20000
+  ]
+ },
+ "fixed": {
+  "mu": 0.35
+ },
+ "tests": [
+  {
+   "name": "P1",
+   "frame": [
+    11,
+    5
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P1.csv",
+   "weight": 1.0
+  },
+  {
+   "name": "P2",
+   "frame": [
+    5,
+    5
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P2.csv",
+   "weight": 1.0
+  },
+  {
+   "name": "P3",
+   "frame": [
+    16,
+    3
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P3.csv",
+   "weight": 1.0
+  }
+ ],
+ "validation": [
+  {
+   "name": "P4",
+   "frame": [
+    2,
+    12
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P4.csv"
+  }
+ ],
+ "replay": {
+  "relax_iter": 2500,
+  "step_iter": 1000,
+  "avg_iter": 300,
+  "n_steps": 5,
+  "max_disp": 1.5,
+  "lock": true,
+  "workers": 2
+ }
+}

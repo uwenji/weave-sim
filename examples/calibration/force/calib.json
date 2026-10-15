@@ -1,0 +1,105 @@
+{
+ "scene": "dome_calib_scene.json",
+ "params": {
+  "mu": [
+   0.15,
+   0.8
+  ],
+  "torsion_factor": [
+   0.3,
+   5.0
+  ],
+  "strength": [
+   3000.0,
+   50000.0
+  ],
+  "stick_strength": [
+   2000.0,
+   50000.0
+  ],
+  "activation": [
+   0.2,
+   1.0
+  ],
+  "pad_stiffness": [
+   500,
+   20000
+  ]
+ },
+ "fixed": {
+  "E": 1000000.0
+ },
+ "tests": [
+  {
+   "name": "P1",
+   "frame": [
+    11,
+    5
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P1.csv",
+   "weight": 1.0
+  },
+  {
+   "name": "P2",
+   "frame": [
+    5,
+    5
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P2.csv",
+   "weight": 1.0
+  },
+  {
+   "name": "P3",
+   "frame": [
+    16,
+    3
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P3.csv",
+   "weight": 1.0
+  }
+ ],
+ "validation": [
+  {
+   "name": "P4",
+   "frame": [
+    2,
+    12
+   ],
+   "axis": [
+    0,
+    0,
+    -1
+   ],
+   "csv": "P4.csv"
+  }
+ ],
+ "replay": {
+  "mode": "force",
+  "relax_iter": 2500,
+  "step_iter": 500,
+  "avg_iter": 150,
+  "n_steps": 4,
+  "cycles": 2,
+  "fit_cycles": [
+   1
+  ],
+  "max_force": 600,
+  "workers": 2,
+  "lock": false
+ }
+}

@@ -1,0 +1,42 @@
+<!doctype html><html><body><pre id="out"></pre>
+<script type="module">
+// GPU batched calibration replay vs the CPU f64 replay and the Python reference (force example at the synthetic truth);
+// determinism: a parameter vector gives the same objective in any batch composition
+import { CalibrationSet, FileResolver } from '../js/calibrate.js';
+import { getDevice } from '../js/solver_gpu.js';
+const q = new URLSearchParams(location.search);
+const log = (s) => { console.log(s); document.getElementById('out').textContent += s + '\n'; };
+(async () => {
+  try {
+    const base = new URL('/examples/calibration/force/calib.json', location.href);
+    const calib = await (await fetch(base)).json();
+    if (q.get('relax')) calib.replay.relax_iter = +q.get('relax');
+    if (q.get('step')) calib.replay.step_iter = +q.get('step');
+    if (q.get('avg')) calib.replay.avg_iter = +q.get('avg');
+    if (q.get('cycles')) calib.replay.cycles = +q.get('cycles');
+    const cs = await CalibrationSet.load(calib, new FileResolver({ base }));
+    const dev = await getDevice();
+    cs.setBackend('gpu', dev);
+    const truth = await (await fetch(new URL('synthetic_truth.json', base))).json();
+    const vals = Object.fromEntries(cs.names().map(k => [k, truth[k]])); vals.pad_stiffness = 0;
+    const other = { ...vals, mu: 0.5, activation: 0.7 };
+    const ref = await (await fetch('/web/tests/ref_out/calib_truth.json')).json();
+    const cpu = await (await fetch('/web/tests/ref_out/calib_js_cpu.json')).json().catch(() => null);
+    let t0 = performance.now();
+    const [a, b] = await cs.objectiveBatch([vals, other], { onProgress: (p) => { if (p.frac === 1 || Math.random() < 0.02) console.log(`  ${p.stage} ${(100 * p.frac).toFixed(0)}%`); } });
+    log(`batch [truth, other]: ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    log(`GPU objective at truth ${a.objective.toFixed(4)}   CPU f64 ${cpu ? cpu.objective.toFixed(4) : '-'}   Python ${ref.objective.toFixed(4)}`);
+    for (const k of Object.keys(a.residuals)) log(`  ${k}: GPU ${a.residuals[k].toFixed(4)}  CPU ${cpu ? cpu.residuals[k].toFixed(4) : '-'}  Py ${ref.residuals[k].toFixed(4)}`);
+    for (const [k, br] of Object.entries(a.sims)) br.forEach((bb, i) => log(`  ${k} c${bb.cycle} ${bb.branch.padEnd(6)} GPU ${bb.d.map(v => v.toFixed(4)).join(' ')}\n${' '.repeat(18)}Py  ${ref.sims[k][i][2].map(v => v.toFixed(4)).join(' ')}`));
+    log(`GPU objective at mu 0.5 / activation 0.7: ${b.objective.toFixed(4)}`);
+    if (q.get('det') !== '0') {
+      t0 = performance.now();
+      const [b2, a2] = await cs.objectiveBatch([other, vals]);
+      log(`batch [other, truth]: ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+      const same = (x, y) => JSON.stringify(x.sims) === JSON.stringify(y.sims);
+      log(`determinism across batches: truth ${same(a, a2) ? 'bit-identical' : 'DIFFERENT'} (${a.objective} vs ${a2.objective}); other ${same(b, b2) ? 'bit-identical' : 'DIFFERENT'}`);
+    }
+  } catch (e) { log('ERROR ' + e.message + '\n' + e.stack); }
+  window.__done = true;
+})();
+</script></body></html>

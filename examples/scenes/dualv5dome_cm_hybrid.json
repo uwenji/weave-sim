@@ -1,0 +1,288 @@
+{
+  "version": 1,
+  "units": {
+    "length": "cm",
+    "force": "N"
+  },
+  "mesh": {
+    "path": "../meshes/dualv5dome.stl",
+    "scale": 1.0
+  },
+  "weave": {
+    "subdivisions": 4,
+    "overhang": 5.0,
+    "offset_mode": "half_height",
+    "flip_knots": [],
+    "seed_strand_phase": 0
+  },
+  "material": {
+    "E": 1000000.0,
+    "G": 62500.0,
+    "density": 700.0
+  },
+  "section": {
+    "width": 4.0,
+    "height": 0.800000011920929,
+    "Ix": null,
+    "Iy": null,
+    "J": null
+  },
+  "contact": {
+    "mu": 0.3499999940395355,
+    "strength": 1000.0,
+    "stick_strength": 1000.0,
+    "torsion_factor": 1.0,
+    "epsilon": 1.5,
+    "ramp_iter": 1500,
+    "slip_rate": 1.0,
+    "locked": false
+  },
+  "beam": {
+    "mode": "simple",
+    "activation": 0.6200000047683716,
+    "stiffness": 0.46000000834465027,
+    "activation_flat": 1.0,
+    "activation_edge": 1.0,
+    "activation_twist": 1.0,
+    "stiffness_flat": 1.0,
+    "stiffness_edge": 1.0,
+    "stiffness_twist": 1.0,
+    "stiffness_axial": 1.0
+  },
+  "solver": {
+    "max_iter": 8000,
+    "tol": 9.999999747378752e-05,
+    "damping": 1.0,
+    "kinetic_damping": true,
+    "mass_scale": 1.5,
+    "warmup_iter": 300,
+    "beam_weight": 1.0,
+    "prestress": "flat",
+    "live_every": 10
+  },
+  "discretize": {
+    "max_length": 100.0,
+    "joint_length": 0.0,
+    "extra_joints": 0,
+    "weights": {
+      "sum_curve": 1.0,
+      "max_curve": 0.0,
+      "min_dist": 1.0,
+      "uniformity_range": 0.0,
+      "uniformity_sum": 1.0,
+      "structural": 0.0,
+      "clearance": 1.0
+    },
+    "structural_layer": "Mx",
+    "iterations": 500,
+    "mll": 100,
+    "initial_temp": 0.05,
+    "cooling": 0.99,
+    "seed": 1
+  },
+  "joints": {},
+  "hybrid": {
+    "enabled": true,
+    "groups": [
+      {
+        "name": "group 2",
+        "material": {
+          "E": 5000000.0,
+          "G": 312500.0,
+          "density": 700.0
+        },
+        "section": {
+          "width": 6.0,
+          "height": 2.0,
+          "Ix": null,
+          "Iy": null,
+          "J": null
+        },
+        "beam": {
+          "mode": "simple",
+          "activation": 0.6200000047683716,
+          "stiffness": 0.46000000834465027,
+          "activation_flat": 1.0,
+          "activation_edge": 1.0,
+          "activation_twist": 1.0,
+          "stiffness_flat": 1.0,
+          "stiffness_edge": 1.0,
+          "stiffness_twist": 1.0,
+          "stiffness_axial": 1.0
+        }
+      }
+    ],
+    "assign": {
+      "45": 2,
+      "40": 2,
+      "2": 2,
+      "3": 2,
+      "46": 2,
+      "41": 2
+    }
+  },
+  "loads": {
+    "gravity": {
+      "enabled": true,
+      "direction": [
+        0.0,
+        0.0,
+        -1.0
+      ]
+    },
+    "udl": {
+      "enabled": true,
+      "q": [
+        0.0,
+        0.0,
+        -10.0
+      ],
+      "per": "length"
+    },
+    "point": []
+  },
+  "anchors": [
+    {
+      "select": {
+        "type": "knots",
+        "ids": [
+          [
+            40,
+            0
+          ],
+          [
+            42,
+            0
+          ],
+          [
+            44,
+            0
+          ],
+          [
+            46,
+            0
+          ]
+        ]
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": ""
+    },
+    {
+      "select": {
+        "type": "knots",
+        "ids": [
+          [
+            40,
+            0
+          ],
+          [
+            42,
+            0
+          ],
+          [
+            44,
+            0
+          ],
+          [
+            46,
+            0
+          ]
+        ]
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": ""
+    },
+    {
+      "select": {
+        "type": "knots",
+        "ids": [
+          [
+            47,
+            47
+          ],
+          [
+            45,
+            45
+          ],
+          [
+            42,
+            45
+          ],
+          [
+            41,
+            41
+          ]
+        ]
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": ""
+    },
+    {
+      "select": {
+        "type": "knots",
+        "ids": [
+          [
+            47,
+            47
+          ],
+          [
+            45,
+            45
+          ],
+          [
+            43,
+            43
+          ],
+          [
+            41,
+            41
+          ]
+        ]
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": ""
+    }
+  ],
+  "utm": {
+    "path": null,
+    "mode": "overlay",
+    "probe": {},
+    "columns": {
+      "force": null,
+      "displacement": null
+    },
+    "units": {
+      "force": "N",
+      "length": "mm"
+    },
+    "pad_stiffness": 0.0
+  }
+}

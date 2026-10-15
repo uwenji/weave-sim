@@ -1,0 +1,5 @@
+synthetic UTM curves from {'mu': 0.35, 'torsion_factor': 1.0, 'strength': 10000.0, 'stick_strength': 10000.0, 'activation': 1.0, 'pad_stiffness': 0.0}
+  P1: peak 600 N, travel 0.47 cm, 41 rows → P1.csv
+  P2: peak 600 N, travel 1.25 cm, 41 rows → P2.csv
+  P3: peak 600 N, travel 0.745 cm, 41 rows → P3.csv
+  P4: peak 600 N, travel 0.97 cm, 41 rows → P4.csv

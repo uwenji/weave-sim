@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU vs CPU</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const names = (q.get('cases') || 'cantilever,cantilever_edge,torsion,cross_press,cross_stick,cross_slip,cross_locked').split(',');
+const iters = +(q.get('iters') || 0);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const rel = (a, b) => { let m = 0, s = 0; for (let i = 0; i < a.length; i++) { m = Math.max(m, Math.abs(a[i] - b[i])); s = Math.max(s, Math.abs(b[i])); } return s ? m / s : m; };
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  log(`adapter: ${JSON.stringify(dev.wsInfo?.architecture || dev.wsInfo?.vendor || dev.adapterInfo?.architecture || '')}`);
+  for (const name of names) {
+    try {
+      const { sc, topo, contacts } = await caseByName(name);
+      const n = iters || { cantilever: 12000, cantilever_edge: 6000, torsion: 3000, cross_press: 8000, cross_stick: 8000, cross_slip: 4000, cross_locked: 4000, cross_w23: 6000, cross_al: 8000, sheet: 3000, v5dome_cm: 3000 }[name] || 2000;
+      const cpu = new CpuSolver(sc, topo, { contacts });
+      const t0 = performance.now(); cpu.run(n); const tc = performance.now() - t0;
+      const sc2 = structuredClone ? sc : sc;
+      const model = new CpuSolver(sc, topo, { contacts });
+      const gpu = new GpuSolver(dev, [model], { perSubmit: 50 });
+      const msgs = await gpu.compileInfo(); if (msgs.some(m => m.startsWith('error'))) { log(name + ' COMPILE ' + msgs.join('\n')); break; }
+      const t1 = performance.now();
+      let done = 0;
+      while (done < n) { const k = Math.min(500, n - done); const c = await gpu.step(k, { force: false }); done += k; if (c[0].done) break; }
+      await gpu.download(0);
+      const tg = performance.now() - t1;
+      const rc = cpu.results(), rg = model.results();
+      const st = cpu.st, sg = model.st;
+      let size = 0; for (const v of st.X) size = Math.max(size, Math.abs(v));
+      let dX = 0; for (let i = 0; i < st.X.length; i++) dX = Math.max(dX, Math.abs(st.X[i] - sg.X[i]));
+      let disp = 0; for (let i = 0; i < st.X.length; i++) disp = Math.max(disp, Math.abs(st.X[i] - st.X0[i]));
+      let s = `${name.padEnd(14)} it cpu ${st.iteration} gpu ${sg.iteration}  res ${st.residual.toExponential(2)} / ${sg.residual.toExponential(2)}  |dX|/|disp| ${(dX / Math.max(disp, 1e-30)).toExponential(2)}  Mx ${rel(rg.segment.Mx, rc.segment.Mx).toExponential(2)}  My ${rel(rg.segment.My, rc.segment.My).toExponential(2)}  T ${rel(rg.segment.T, rc.segment.T).toExponential(2)}  N ${rel(rg.segment.N, rc.segment.N).toExponential(2)}`;
+      if (contacts) s += `  Fn ${cpu.contact.Fn[0].toFixed(5)} / ${model.contact.Fn[0].toFixed(5)}  Ft ${cpu.contact.Ft[0].toFixed(5)} / ${model.contact.Ft[0].toFixed(5)}  gap ${cpu.contact.gap[0].toFixed(6)} / ${model.contact.gap[0].toFixed(6)}  state ${cpu.contact.state[0]}/${model.contact.state[0]}  slip ${st.slip[0].toFixed(4)}/${sg.slip[0].toFixed(4)}`;
+      const tip = sg.X.length - 1;
+      s += `  tip z ${st.X[tip].toFixed(6)} / ${sg.X[tip].toFixed(6)}   (${tc.toFixed(0)} ms cpu, ${tg.toFixed(0)} ms gpu)`;
+      log(s);
+      gpu.dispose();
+    } catch (e) { log(name + ' ERROR ' + e.message + '\n' + e.stack); }
+  }
+  window.__done = true;
+})();
+</script></body></html>

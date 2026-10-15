@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "units": {
+    "length": "cm",
+    "force": "N"
+  },
+  "mesh": {
+    "path": "../meshes/v5dome.stl",
+    "scale": 1.0
+  },
+  "weave": {
+    "subdivisions": 4,
+    "overhang": 5.0,
+    "offset_mode": "half_height",
+    "flip_knots": [],
+    "seed_strand_phase": 0
+  },
+  "material": {
+    "E": 1000000.0,
+    "G": 62500.0,
+    "density": 700.0,
+    "E90": 80000.0,
+    "fc90": 800.0,
+    "H": 3000.0
+  },
+  "section": {
+    "width": 2.0,
+    "height": 0.800000011920929,
+    "Ix": null,
+    "Iy": null,
+    "J": null
+  },
+  "contact": {
+    "mu": 0.3499999940395355,
+    "strength": 2300.0,
+    "stick_strength": 2300.0,
+    "torsion_factor": 1.0,
+    "epsilon": 1.5,
+    "ramp_iter": 1500,
+    "slip_rate": 0.30000001192092896,
+    "locked": false,
+    "rot_friction": false,
+    "rot_factor": 1.0,
+    "seat_law": "off",
+    "seat_gap": true,
+    "dent_rate": 0.01,
+    "dent_after_iter": -1,
+    "edge_threshold": 0.5
+  },
+  "beam": {
+    "mode": "simple",
+    "activation": 1.0,
+    "stiffness": 1.0,
+    "activation_flat": 1.0,
+    "activation_edge": 1.0,
+    "activation_twist": 1.0,
+    "stiffness_flat": 1.0,
+    "stiffness_edge": 1.0,
+    "stiffness_twist": 1.0,
+    "stiffness_axial": 1.0
+  },
+  "solver": {
+    "max_iter": 8000,
+    "tol": 9.999999747378752e-05,
+    "damping": 1.0,
+    "kinetic_damping": true,
+    "mass_scale": 1.5,
+    "warmup_iter": 300,
+    "beam_weight": 1.0,
+    "prestress": "flat",
+    "live_every": 10
+  },
+  "discretize": {
+    "max_length": 100.0,
+    "joint_length": 0.0,
+    "extra_joints": 0,
+    "weights": {
+      "sum_curve": 1.0,
+      "max_curve": 0.0,
+      "min_dist": 1.0,
+      "uniformity_range": 0.0,
+      "uniformity_sum": 1.0,
+      "structural": 0.0,
+      "clearance": 1.0
+    },
+    "structural_layer": "Mx",
+    "iterations": 500,
+    "mll": 100,
+    "initial_temp": 0.05,
+    "cooling": 0.99,
+    "seed": 1
+  },
+  "joints": {},
+  "hybrid": {
+    "enabled": true,
+    "groups": [
+      {
+        "name": "group 2",
+        "material": {
+          "E": 1000000.0,
+          "G": 62500.0,
+          "density": 700.0,
+          "E90": 80000.0,
+          "fc90": 800.0,
+          "H": 3000.0
+        },
+        "section": {
+          "width": 2.0,
+          "height": 0.800000011920929,
+          "Ix": null,
+          "Iy": null,
+          "J": null
+        },
+        "beam": {
+          "mode": "simple",
+          "activation": 1.0,
+          "stiffness": 1.0,
+          "activation_flat": 1.0,
+          "activation_edge": 1.0,
+          "activation_twist": 1.0,
+          "stiffness_flat": 1.0,
+          "stiffness_edge": 1.0,
+          "stiffness_twist": 1.0,
+          "stiffness_axial": 1.0
+        }
+      }
+    ],
+    "assign": {
+      "12": 2
+    }
+  },
+  "loads": {
+    "gravity": {
+      "enabled": true,
+      "direction": [
+        0.0,
+        0.0,
+        -1.0
+      ]
+    },
+    "udl": {
+      "enabled": false,
+      "q": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "per": "area"
+    },
+    "point": []
+  },
+  "anchors": [
+    {
+      "select": {
+        "type": "all_start"
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": "starts"
+    },
+    {
+      "select": {
+        "type": "all_end"
+      },
+      "fix": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "name": "ends"
+    }
+  ],
+  "utm": {
+    "path": null,
+    "mode": "overlay",
+    "probe": {
+      "frame": [
+        2,
+        9
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ]
+    },
+    "columns": {
+      "force": null,
+      "displacement": null
+    },
+    "units": {
+      "force": "N",
+      "length": "mm"
+    },
+    "pad_stiffness": 0.0
+  }
+}

@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU trace</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const name = q.get('case') || 'cantilever';
+const cps = (q.get('cps') || '1,2,3,5,10,50,100,300,301,302,310,350,500,1000').split(',').map(Number);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const mx = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const mxc = (a, b, c) => { let m = 0; for (let i = c; i < a.length; i += 3) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const mvc = (a, c) => { let m = 0; for (let i = c; i < a.length; i += 3) m = Math.max(m, Math.abs(a[i])); return m; };
+const mv = (a) => { let m = 0; for (const v of a) m = Math.max(m, Math.abs(v)); return m; };
+(async () => {
+  const dev = await getDevice();
+  const { sc, topo, contacts } = await caseByName(name);
+  const cpu = new CpuSolver(sc, topo, { contacts });
+  const model = new CpuSolver(sc, topo, { contacts });
+  const gpu = new GpuSolver(dev, [model], { perSubmit: 50 });
+  log(`PB ${gpu.PB} FB ${gpu.FB} TB ${gpu.TB} KB ${gpu.KB}`);
+  let done = 0;
+  for (const cp of cps) {
+    while (cpu.st.iteration < cp) cpu.step(1);
+    await gpu.step(cp - done, { force: false }); done = cp;
+    await gpu.download(0, { rebase: false });
+    const a = cpu.st, b = model.st;
+    let disp = 0; for (let i = 0; i < a.X.length; i++) disp = Math.max(disp, Math.abs(a.X[i] - a.X0[i]));
+    log(`it ${String(cp).padStart(5)} gpu-it ${b.iteration}  dX ${mx(a.X, b.X).toExponential(2)} (disp ${disp.toExponential(2)})  dV ${mx(a.V, b.V).toExponential(2)}/${mv(a.V).toExponential(2)}  dQ ${mx(a.Q, b.Q).toExponential(2)}  dW ${mx(a.Wt, b.Wt).toExponential(2)}/${mv(a.Wt).toExponential(2)}  N ${mx(cpu.beam.N, model.beam.N).toExponential(2)}/${mv(cpu.beam.N).toExponential(2)}  M1 ${mxc(cpu.beam.M, model.beam.M, 0).toExponential(2)}/${mvc(cpu.beam.M, 0).toExponential(2)} M2 ${mxc(cpu.beam.M, model.beam.M, 1).toExponential(2)}/${mvc(cpu.beam.M, 1).toExponential(2)} Mt ${mxc(cpu.beam.M, model.beam.M, 2).toExponential(2)}/${mvc(model.beam.M, 2).toExponential(2)} tip ${a.X[a.X.length-1].toFixed(5)}/${b.X[b.X.length-1].toFixed(5)}  ke ${cpu.kePrev.toExponential(3)}/${model.kePrev.toExponential(3)}  res ${a.residual.toExponential(2)}/${b.residual.toExponential(2)}` + (cpu.contact ? `  Fn ${cpu.contact.Fn[0].toFixed(6)}/${model.contact.Fn[0].toFixed(6)} Ft ${cpu.contact.Ft[0].toExponential(3)}/${model.contact.Ft[0].toExponential(3)} u ${a.u[0].toFixed(7)},${a.u[1].toFixed(7)}/${b.u[0].toFixed(7)},${b.u[1].toFixed(7)} st ${cpu.contact.state[0]}/${model.contact.state[0]}` : ''));
+  }
+  window.__done = true;
+})();
+</script></body></html>

@@ -1,0 +1,33 @@
+<!doctype html><html><body><pre id="out"></pre>
+<script type="module">
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const name = q.get('case') || 'v5dome_cm', N = +(q.get('iters') || 3000);
+const log = (s) => console.log(s);
+const stats = (sv) => {
+  const r = sv.results(), c = sv.contact, st = sv.st;
+  let dmax = 0, dsum = 0; for (let i = 0; i < st.n; i++) { const d = Math.hypot(r.disp[3*i], r.disp[3*i+1], r.disp[3*i+2]); dmax = Math.max(dmax, d); dsum += d; }
+  const mx = (a) => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0), mean = (a) => a.reduce((s, v) => s + Math.abs(v), 0) / a.length;
+  return { Fn_mean: mean(c.Fn), Fn_max: mx(c.Fn), Ft_mean: mean(c.Ft), slip_frac: c.state.reduce((s, v) => s + v, 0) / c.K, Mx_max: mx(r.segment.Mx), My_max: mx(r.segment.My), T_max: mx(r.segment.T), N_max: mx(r.segment.N), disp_max: dmax, disp_mean: dsum / st.n, E_strain: r.energies.strain, resid: st.residual,
+    arrays: { Fn: Array.from(c.Fn), Mx: Array.from(r.segment.Mx), disp: Array.from(r.disp) } };
+};
+const relDiff = (a, b) => { let m = 0, s = 0; for (let i = 0; i < a.length; i++) { m += (a[i] - b[i]) ** 2; s += b[i] ** 2; } return Math.sqrt(m / Math.max(s, 1e-300)); };
+(async () => {
+  const dev = await getDevice();
+  const { sc, topo, contacts } = await caseByName(name);
+  const A = new CpuSolver(sc, topo, { contacts });
+  const B = new CpuSolver(sc, topo, { contacts }); for (let i = 0; i < B.st.X.length; i++) B.st.X[i] *= 1 + (+(q.get("pert") || 1e-12));
+  const model = new CpuSolver(sc, topo, { contacts });
+  const gpu = new GpuSolver(dev, [model], { perSubmit: 100 });
+  let t0 = performance.now(); A.step(N); const tA = performance.now() - t0; B.step(N);
+  t0 = performance.now(); let done = 0; while (done < N) { const k = Math.min(1000, N - done); await gpu.step(k, { force: false }); done += k; } await gpu.download(0); const tG = performance.now() - t0;
+  const sa = stats(A), sb = stats(B), sg = stats(model);
+  log(`${name} after ${N} iterations   (cpu ${tA.toFixed(0)} ms, gpu ${tG.toFixed(0)} ms on this adapter)`);
+  log(`${'quantity'.padEnd(10)} ${'cpu f64'.padStart(12)} ${'cpu f64 pert.'.padStart(15)} ${'gpu f32'.padStart(12)}`);
+  for (const k of Object.keys(sa)) if (k !== 'arrays') log(`${k.padEnd(10)} ${sa[k].toPrecision(6).padStart(12)} ${sb[k].toPrecision(6).padStart(15)} ${sg[k].toPrecision(6).padStart(12)}`);
+  for (const k of ['Fn', 'Mx', 'disp']) log(`rms diff ${k.padEnd(5)}  f64 vs perturbed f64: ${relDiff(sb.arrays[k], sa.arrays[k]).toExponential(2)}   f64 vs gpu: ${relDiff(sg.arrays[k], sa.arrays[k]).toExponential(2)}`);
+  window.__done = true;
+})();
+</script></body></html>
