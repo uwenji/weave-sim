@@ -15,7 +15,7 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 | `js/app.js` | scene / model management, panels, solve loop, picking (frames; whole laths for the lath groups), UTM replay, Rhino export |
 | `js/display_ui.js` | the Display sidebar: lath colouring and legend, member diagrams, joints overlay |
 | `js/disc_ui.js` | the discretisation: strip tab, section 8, plots, joints csv |
-| `js/protocol_ui.js` | the fastened-structure protocol under Run: Zero → settle → Lock (toggle), the phase bands of the strip chart |
+| `js/protocol_ui.js` | the load-test protocol under Run: Zero → settle → pause (the 4 Contact box locks), the phase bands of the strip chart |
 | `js/calib_ui.js` | the calibration panel |
 | `js/view.js` | three.js view: laths as swept sections on the current state (colour-map texture per fragment: exact gradients), centrelines, crossings, loads, anchors, probes, selection, diagrams, joints, lath selection, soft ground shadow |
 | `js/diagrams.js` | member diagrams (diagrams.py): Mx My Vy Vx T N curvature strips, deflected shape, contact forces, reactions, labels |
@@ -96,12 +96,14 @@ interactive run and a calibration share it and the driver interleaves them.
   along it, the value of the colour layer and of the diagram at that point — interpolated exactly as drawn — or the
   section forces Mx My T N when neither is shown; next to a crossing also its contact state (Fn, Ft, stick / slip, gap,
   slip, contact type).
-* **Fastened-structure protocol** (strip, under Run; Python: `1 Internalize · 2 Lock · 3 Unlock`): `Zero`
+* **Load-test protocol** (strip, under Run; Python: `1 Internalize`): `Zero`
   takes the relaxed geometry as the reference (X0 = X, slip 0) and settles for the given iterations, then takes the
-  settled state as the reference again, locks every crossing at its sliding position and pauses, so Results › *delta*
-  after the load is the load displacement alone; the drift during the settle is reported. `Lock` is a toggle with a
-  light. The strip chart shades the phases in the colour-annealing idiom — grey *relax*, sand *zero* with a
-  dashed line at the planned end, blue *locked* — and keeps the latest Zero in view. On the GPU the reference
+  settled state as the reference again and pauses (Run → Pause), so Results › *delta*
+  after the load is the load displacement alone; the drift during the settle is reported. The crossings are not
+  touched: fastened joints are the *lock all crossings* box in 4 Contact (17 Oct 2026 — the strip's `Lock` button was
+  removed; it doubled the box and read like a solver freeze). The strip chart shades the phases in the
+  colour-annealing idiom — grey *relax*, sand *zero* with a
+  dashed line at the planned end, blue *locked* while the box is ticked — and keeps the latest Zero in view. On the GPU the reference
   copy goes through a scratch buffer (WebGPU rejects a copy within one buffer; until 15 Oct the GPU kept its old
   reference, so delta on WebGPU was measured from the earlier state).
 * **Diagrams** (Display › Diagram): Mx, My, Vy, Vx, T, N and the centreline curvature as filled, hatched strips along

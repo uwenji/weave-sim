@@ -26,7 +26,7 @@ certificate warning once (the certificate is made with openssl on the first star
    its mesh (select both files, or drop them on the view). A mesh alone starts a new scene with the current settings
    and anchors at the strand ends.
 2. **Solve strip** (top of the left bar, always visible) — `Solver` tab: `Run` / `Pause` (Space), `Step` n iterations,
-   `Reset` to the woven geometry; under them the fastened-structure protocol, `Zero` [iterations] → `Lock` (6).
+   `Reset` to the woven geometry; under them the load-test protocol, `Zero` [settle iterations] (6).
    The chart shows the residual (unbalanced force / largest force, log scale) and the kinetic energy; switch it to the
    energy parts or the probe force–travel curve. The `Discretisation` tab runs the joint placement (below).
 3. **Display** (the sidebar at the right of the view; `⇄` moves it to the left, the header folds it to a tab) —
@@ -45,13 +45,14 @@ certificate warning once (the certificate is made with openssl on the first star
 5. **Lath groups** (3) — tick *lath groups*, choose the group to edit, `Select laths…` and click laths in the view: the
    selected laths turn orange with a dark line along them, the others fade (click a lath again to remove it, click
    anywhere else to clear, `laths of group` takes the group's current laths, Esc leaves). `Assign … to group n`.
-6. **Fastened structure** (strip, under Run) — relax (`Run`), then `Zero` (Internalize in the Python program): the
+6. **Load test** (strip, under Run) — relax (`Run`), then `Zero` (Internalize in the Python program): the
    relaxed geometry becomes the reference (displacement and slip zero — the zigzag of the input mesh that the
    relaxation took out is not counted), the solver settles for the given iterations (the button fills, the chart shades
    the *zero* band, the drift shows under the chart — above a tenth of the lath thickness it is flagged: relax longer;
-   click it again to stop), then the settled state becomes the reference, every crossing locks (the `Lock` light) and
-   the solver pauses. Add the load, `Run`, and read Display › *delta*. `Lock` is one toggle (same as *lock all
-   crossings* in 4 Contact); `0` iterations locks at once.
+   click it again to stop), then the settled state becomes the reference and the solver pauses (Run → Pause, nothing
+   else). Add the load, `Run`, and read Display › *delta*. `0` iterations zeroes at once. The crossings are never
+   locked by Zero: for fastened joints tick *lock all crossings* in 4 Contact (the chart shows it as the blue *locked*
+   band).
 7. **Joints** (8 Discretisation, strip › Discretisation) — stock length, joint length, extra joints, the objective
    weights (curvature at the joints, spacing, uniform pieces, keep clear of crossings, *structural*: away from high
    values of a result layer — solve first). `Run` anneals the joint positions on the current geometry; the cuts appear

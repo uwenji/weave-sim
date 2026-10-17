@@ -1,12 +1,13 @@
-// Fastened-structure protocol, in the solve strip under Run (Python: panels.py "1 Internalize · 2 Lock · 3 Unlock";
-// the step is called Zero here, as in zeroing the gauges before a load test). Zero takes the current (relaxed) geometry
-// as the reference — displacement and slip restart from zero, so the zigzag of the input mesh that the relaxation took
-// out is not counted as load displacement — and lets the solver settle for the given iterations, the button filling as
-// it goes. At the end the settled state becomes the reference, every crossing locks at its sliding position (the Lock
-// light) and the solver pauses: add the load and Run, and Results › delta is the load displacement alone. The drift
-// during the settle is reported. Lock is one toggle; Zero clicked while it settles stops the settle. The phases are kept
-// as iteration bands for the strip chart, in the idiom of the colour-annealing chart: grey relax, sand zero (dashed line
-// at the planned end), blue locked.
+// Load-test protocol, in the solve strip under Run (Python: panels.py "1 Internalize"; the step is called Zero here, as
+// in zeroing the gauges before a load test). Zero takes the current (relaxed) geometry as the reference — displacement
+// and slip restart from zero, so the zigzag of the input mesh that the relaxation took out is not counted as load
+// displacement — and lets the solver settle for the given iterations, the button filling as it goes. At the end the
+// settled state becomes the reference and the solver pauses (Run → Pause, nothing else): add the load and Run, and
+// Results › delta is the load displacement alone. The drift during the settle is reported. Zero clicked while it settles
+// stops the settle. The crossings are never locked by the protocol — fastened joints are the explicit *lock all
+// crossings* box in 4 Contact (setLocked), which the chart shows as a blue *locked* band. The phases are kept as
+// iteration bands for the strip chart, in the idiom of the colour-annealing chart: grey relax, sand zero (dashed line at
+// the planned end), blue locked.
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -32,7 +33,6 @@ export function initProtocol(ctx) {
   const it = () => (A.model ? A.model.st.iteration : 0);
   const contact = () => (A.model && A.model.contact && A.model.contact.locked.length ? A.model.contact : null);
   const isLocked = () => { const c = contact(); return !!c && c.locked.every(Boolean); };
-  const anyLocked = () => { const c = contact(); return !!c && c.locked.some(Boolean); };
   const units = () => esc(A.scene ? A.scene.units.length : '');
   const steps = () => Math.max(0, Math.round(+$('nb-zero-steps').value || 0));
   /** lath thickness (largest over the groups): a settle drift above a tenth of it means the relaxation had not finished */
@@ -69,19 +69,17 @@ export function initProtocol(ctx) {
     if (on) openLock(it()); else closeLock(it());
   }
 
-  /** end of the settle: the settled state is the reference, the crossings lock, the solver pauses (inside the solve loop) */
+  /** end of the settle: the settled state is the reference, the solver pauses (inside the solve loop); the crossings
+   *  are left as they are (locked only if 4 Contact says so) */
   function complete() {
     const ph = P.phase, i = it();
     if (ph) { ph.end = i; ph.drift = drift(); ph.slip = slipMax(); ph.conv = !!A.model.converged; P.phase = null; }
     zeroNow();
-    const lockable = !!contact();
-    if (lockable) lockNow(true);
     P.last = ph || { kind: 'zero', i0: i, i1: i, end: i, n: 0, drift: 0, slip: 0, conv: false };
     ctx.stopRun();
     const u = A.scene.units.length, l = P.last, mv = moving(l);
     const how = ph ? `settled ${l.end - l.i0} it${l.conv ? ' (converged)' : ''}, drift ${fmt(l.drift, 3)} ${u}${mv ? ' — still moving: relax longer before loading' : ''}` : 'zeroed';
-    status(lockable ? `${how} · crossings locked at it ${i} — add the load, then Run; Results › delta measures from here`
-      : `${how} · reference at it ${i} (no crossings to lock) — add the load, then Run`, mv ? 'warn' : '');
+    status(`${how} · reference at it ${i}${isLocked() ? ' (crossings locked)' : ''} — add the load, then Run; Results › delta measures from here`, mv ? 'warn' : '');
     sync(); ctx.drawChart(); ctx.updateSummaries();
   }
 
@@ -99,7 +97,7 @@ export function initProtocol(ctx) {
       else complete();
     });
     ctx.refreshViews();
-    if (P.phase) { status(`zeroed at it ${P.phase.i0} — settling ${n} iterations, then the crossings lock and the solver pauses`); ctx.startRun(); }
+    if (P.phase) { status(`zeroed at it ${P.phase.i0} — settling ${n} iterations, then the solver pauses`); ctx.startRun(); }
     sync(); ctx.drawChart(); ctx.updateSummaries();
   }
 
@@ -111,7 +109,7 @@ export function initProtocol(ctx) {
       ph = P.phase; if (!ph) return;
       ph.end = it(); ph.stopped = true; ph.drift = drift(); ph.slip = slipMax(); P.last = ph; P.phase = null;
     });
-    if (ph) status(`settle stopped at ${ph.end - ph.i0} / ${ph.n} — the reference stays at it ${ph.i0}, crossings unchanged`);
+    if (ph) status(`settle stopped at ${ph.end - ph.i0} / ${ph.n} — the reference stays at it ${ph.i0}`);
     sync(); ctx.drawChart();
   }
 
@@ -136,16 +134,11 @@ export function initProtocol(ctx) {
 
   // ----------------------------------------------------------------------------------------- display
   function sync() {
-    const bz = $('btn-zero'), bl = $('btn-lock'), ph = P.phase;
+    const bz = $('btn-zero'), ph = P.phase;
     bz.classList.toggle('on', !!ph);
     bz.setAttribute('aria-pressed', ph ? 'true' : 'false');
     bz.style.setProperty('--p', ph ? `${Math.min(100, Math.max(0, 100 * (it() - ph.i0) / Math.max(ph.n, 1))).toFixed(1)}%` : '0%');
     bz.disabled = !A.model;
-    const has = !!contact(), on = has && isLocked();
-    bl.disabled = !has;
-    bl.setAttribute('aria-pressed', on ? 'true' : 'false');
-    bl.classList.toggle('part', has && !on && anyLocked());
-    bl.title = !has ? 'no crossings in this model' : on ? 'crossings locked (fastened) — click to let them slide' : 'lock every crossing at its current sliding position (fastened joints); click again to let them slide';
   }
 
   /** x window and phase bands for the strip chart. first / last: iterations of the oldest and newest history entry.
@@ -192,7 +185,6 @@ export function initProtocol(ctx) {
   $('nb-zero-steps').value = store.get('zeroSteps', store.get('intSteps', +$('nb-zero-steps').value || 1000));
   $('nb-zero-steps').addEventListener('change', () => store.set('zeroSteps', steps()));
   $('btn-zero').onclick = () => { onZero().catch(e => { console.error(e); status('Zero failed: ' + e.message, 'warn'); }); };
-  $('btn-lock').onclick = () => { setLocked(!isLocked()).catch(e => { console.error(e); status('lock failed: ' + e.message, 'warn'); }); };
   sync();
 
   return { runTarget, clampStep, onRunEnd, lockChanged, reset, sync, chart, line, setLocked, isLocked, active: () => !!P.phase };

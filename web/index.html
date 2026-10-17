@@ -46,10 +46,8 @@
           <button id="btn-reset" class="btn" title="restart from the woven geometry">Reset</button>
         </div>
         <div class="row buttons" id="strip-protocol" role="group" aria-label="fastened-structure protocol">
-          <button id="btn-zero" class="btn proto" title="Zero (fastened-structure protocol, after relaxing): the current geometry becomes the reference (displacement and slip restart from zero) and the solver settles for the given iterations — the drift shows under the chart; then the settled state becomes the reference, the crossings lock and the solver pauses. Add the load and Run: Results › delta is the load displacement. Click while it settles to stop.">Zero</button>
-          <input type="number" id="nb-zero-steps" class="num sm" min="0" step="100" value="1000" title="settle iterations after Zero (0 = lock at once)">
-          <span class="proto-arrow" aria-hidden="true">→</span>
-          <button id="btn-lock" class="btn lock" aria-pressed="false" title="lock every crossing at its current sliding position (fastened joints); click again to let them slide"><span class="led" aria-hidden="true"></span>Lock</button>
+          <button id="btn-zero" class="btn proto" title="Zero (after relaxing): the current geometry becomes the reference (displacement and slip restart from zero) and the solver settles for the given iterations — the drift shows under the chart; then the settled state becomes the reference and the solver pauses. Add the load and Run: Results › delta is the load displacement. Fastened joints: tick 'lock all crossings' in 4 Contact. Click while it settles to stop.">Zero</button>
+          <input type="number" id="nb-zero-steps" class="num sm" min="0" step="100" value="1000" title="settle iterations after Zero (0 = zero at once)">
         </div>
         <div id="chart-legend" class="mono"></div>
         <canvas id="chart"></canvas>
@@ -277,7 +275,7 @@
         </div>
         <div class="row"><label class="check"><input type="checkbox" id="ck-kd" data-bind="solver.kinetic_damping"> kinetic damping</label>
           <label for="sel-prestress">prestress ref</label><select id="sel-prestress" data-bind="solver.prestress"><option value="flat">flat</option><option value="asbuilt">asbuilt</option></select></div>
-        <p class="hint">fastened-structure protocol (relax → Zero → Lock → add the load → Run → Results › delta): in the strip, under Run</p>
+        <p class="hint">load-test protocol (relax → Zero → add the load → Run → Results › delta): in the strip, under Run; tick the box above for fastened joints</p>
       </div>
     </details>
 

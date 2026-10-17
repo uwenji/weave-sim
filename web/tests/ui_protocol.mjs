@@ -1,6 +1,6 @@
-// Fastened-structure protocol on the WebGPU solver (headless Chromium, SwiftShader): relax → Zero (settle) →
-// the crossings lock on the host and the GPU, the settled state is the reference on both, the solver pauses; a load and
-// a run give a delta; strip screenshots (settling, locked, loaded) for a look at the bands and the buttons.
+// Load-test protocol on the WebGPU solver (headless Chromium, SwiftShader): relax → Zero (settle) → the settled state
+// is the reference on the host and the GPU, the solver pauses with the crossings untouched; the 4 Contact box then locks
+// them on both; a load and a run give a delta; strip screenshots (settling, zeroed, loaded) for a look at the bands.
 // node tests/ui_protocol.mjs [outdir]
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
 import { ROOT, launchChromium } from './paths.mjs';
@@ -32,8 +32,8 @@ ok(!mid.phase || (mid.on && parseFloat(mid.fill) > 0), `settling on the GPU: but
 await shot('strip_settling.png');
 await page.waitForFunction(() => !window.weavesim.protocol.phase && !window.weavesim.running && !window.weavesim.busy, null, { timeout: 300000 });
 await page.waitForTimeout(300);
-await shot('strip_locked.png');
-// host and GPU agree: reference = settled state, slip zero, every crossing locked
+await shot('strip_zeroed.png');
+// host and GPU agree: reference = settled state, slip zero, crossings untouched (free)
 const r = await W(async () => {
   const A = window.weavesim, st = A.model.st, P = A.protocol;
   const host = { it: st.iteration, X: Array.from(st.X), X0: Array.from(st.X0), slip: Array.from(st.slip), lock: Array.from(A.model.contact.locked) };
@@ -41,14 +41,18 @@ const r = await W(async () => {
   const dev = { X: Array.from(st.X), X0: Array.from(st.X0), slip: Array.from(st.slip), lock: Array.from(A.model.contact.locked) };
   let dX = 0, dX0 = 0, dRef = 0; for (let i = 0; i < host.X.length; i++) { dX = Math.max(dX, Math.abs(host.X[i] - dev.X[i])); dX0 = Math.max(dX0, Math.abs(host.X0[i] - dev.X0[i])); dRef = Math.max(dRef, Math.abs(dev.X[i] - dev.X0[i])); }
   return { it: host.it, last: { ...P.last }, phases: P.phases.map(p => `${p.kind} ${p.i0}-${p.end}`), dX, dX0, dRef, slipH: Math.max(0, ...host.slip.map(Math.abs)), slipD: Math.max(0, ...dev.slip.map(Math.abs)),
-    lockH: host.lock.every(Boolean), lockD: dev.lock.every(Boolean), led: document.getElementById('btn-lock').getAttribute('aria-pressed'), text: document.getElementById('strip-text').textContent, win: A.chartWin };
+    lockH: host.lock.some(Boolean), lockD: dev.lock.some(Boolean), text: document.getElementById('strip-text').textContent, win: A.chartWin };
 });
 ok(r.last.i0 === i0 && r.it === r.last.end && r.it <= i0 + 600, `settle ${r.last.i0} → ${r.last.end} (${r.last.conv ? 'converged' : 'planned end'}), drift ${r.last.drift.toPrecision(3)} · paused`);
-ok(r.lockH && r.lockD && r.led === 'true', 'every crossing locked on the host and on the GPU · Lock light on');
+ok(!r.lockH && !r.lockD, 'no crossing locked by the settle, on the host or on the GPU');
 ok(r.dRef === 0 && r.dX0 === 0 && r.slipH === 0 && r.slipD === 0, `the GPU reference is the settled state: max |x − x0| ${r.dRef}, host/GPU x0 ${r.dX0}, slip ${r.slipD}`);
 ok(r.win.bands.join('|').includes(`zero ${i0}–${r.it}`) && r.win.vlines.includes(r.it), `chart bands ${r.win.bands.join(' | ')} · dashed at ${r.win.vlines}`);
 ok(r.text.includes('still moving') === r.last.drift > 0.1 * (await W(() => window.weavesim.scene.section.height)), `drift flag (relaxed only 400 it): …${r.text.split('N·cm').pop()}`);
-// a load and a run: the crossings stay locked, the delta is the load displacement
+// fasten through 4 Contact (host and GPU), then a load and a run: the crossings stay locked, the delta is the load displacement
+await W(() => { document.getElementById('sec-contact').open = true; });
+await page.check('#ck-locked'); await page.waitForTimeout(400);
+const lk = await W(async () => { const A = window.weavesim; const host = A.model.contact.locked.every(Boolean); await A.gpu.download(0); return { host, dev: A.model.contact.locked.every(Boolean), bands: A.chartWin.bands }; });
+ok(lk.host && lk.dev && lk.bands.some(b => b.startsWith('locked ')), `4 Contact box: every crossing locked on the host and the GPU · bands ${lk.bands.join(' | ')}`);
 await W(() => { window.weavesim.selection = [[11, 5]]; });
 await W(() => { document.getElementById('sec-loads').open = true; });
 await page.selectOption('#sel-loaddir', 'world'); await page.fill('#nb-lmag', '300'); await page.click('#btn-addload'); await page.waitForTimeout(200);

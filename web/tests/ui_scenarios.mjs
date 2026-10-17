@@ -27,13 +27,13 @@ it = await W(() => window.weavesim.model.st.iteration); ok(it === 400, `GPU cont
 await page.click('#st-backend'); await page.waitForFunction(() => window.weavesim.backend === 'cpu' && !window.weavesim.gpu, null, { timeout: 60000 });
 await page.click('#btn-step'); await page.waitForTimeout(800);
 it = await W(() => window.weavesim.model.st.iteration); ok(it === 500, `back on the CPU: iteration ${it}`);
-// 2 fastened protocol (strip, under Run): Zero → settle → the crossings lock and the solver pauses; a click
-//   while it settles stops it; Lock is one toggle; then a load at a selected frame, a step, the delta layer
-const PS = () => W(() => { const A = window.weavesim, P = A.protocol, st = A.model.st, bi = document.getElementById('btn-zero'), bl = document.getElementById('btn-lock');
+// 2 load-test protocol (strip, under Run): Zero → settle → the solver pauses (crossings untouched); a click while it
+//   settles stops it; the 4 Contact box locks / unlocks; then a load at a selected frame, a step, the delta layer
+const PS = () => W(() => { const A = window.weavesim, P = A.protocol, st = A.model.st, bi = document.getElementById('btn-zero');
   let d = 0; for (let i = 0; i < 3 * st.n; i++) d = Math.max(d, Math.abs(st.X[i] - st.X0[i]));
   let sl = 0; for (const v of st.slip) sl = Math.max(sl, Math.abs(v));
   return { it: st.iteration, running: A.running, phase: P.phase && { ...P.phase }, last: P.last && { ...P.last }, phases: P.phases.map(p => `${p.kind} ${p.i0}-${p.end}`),
-    locked: A.model.contact.locked.every(Boolean), any: A.model.contact.locked.some(Boolean), led: bl.getAttribute('aria-pressed'), on: bi.classList.contains('on'), fill: bi.style.getPropertyValue('--p'),
+    locked: A.model.contact.locked.every(Boolean), any: A.model.contact.locked.some(Boolean), on: bi.classList.contains('on'), fill: bi.style.getPropertyValue('--p'),
     box: document.getElementById('ck-locked').checked, d, sl, text: document.getElementById('strip-text').textContent, win: A.chartWin }; });
 let it0 = await W(() => window.weavesim.model.st.iteration);
 await page.fill('#nb-zero-steps', '100000'); await page.dispatchEvent('#nb-zero-steps', 'change');
@@ -44,24 +44,22 @@ ok(ps.phase && ps.phase.i0 === it0 && ps.phase.i1 === it0 + 100000 && ps.running
 ok(ps.win && ps.win.bands.some(b => b.startsWith('zero ' + it0)) && ps.win.xmax >= it0 + 100000, `chart: bands ${JSON.stringify(ps.win?.bands)} · x to ${ps.win?.xmax}`);
 await page.click('#btn-zero'); await page.waitForFunction(() => !window.weavesim.protocol.phase && !window.weavesim.running && !window.weavesim.busy, null, { timeout: 60000 });
 ps = await PS();
-ok(ps.last && (ps.last.stopped || ps.last.conv) && (ps.last.stopped ? !ps.any : ps.locked), `a second click stops the settle at ${ps.last?.end - ps.last?.i0} it (stopped ${!!ps.last?.stopped}, crossings locked ${ps.locked})`);
+ok(ps.last && (ps.last.stopped || ps.last.conv) && !ps.any, `a second click stops the settle at ${ps.last?.end - ps.last?.i0} it (stopped ${!!ps.last?.stopped}, crossings free)`);
 it0 = ps.it;
 await page.fill('#nb-zero-steps', '120'); await page.dispatchEvent('#nb-zero-steps', 'change');
 await page.click('#btn-zero');
 await page.waitForFunction(() => !window.weavesim.protocol.phase && !window.weavesim.running && !window.weavesim.busy && window.weavesim.protocol.last && window.weavesim.protocol.last.i0 >= 0 && !window.weavesim.protocol.last.stopped, null, { timeout: 120000 });
 ps = await PS();
 ok(ps.last.i0 === it0 && ps.last.end === ps.it && ps.it <= it0 + 120 && ps.it > it0, `settled ${ps.it - it0} it (planned 120${ps.last.conv ? ', converged' : ''}) and paused`);
-ok(ps.locked && ps.led === 'true' && ps.box, 'end of the settle: every crossing locked, the Lock light on, 4 Contact box ticked');
+ok(!ps.any && !ps.box, 'end of the settle: the crossings are untouched (free), 4 Contact box unticked');
 ok(ps.d === 0 && ps.sl === 0, `the settled state is the reference: max |X − X0| ${ps.d}, slip ${ps.sl}`);
-ok(/locked at it \d+ · settle drift/.test(ps.text) && ps.text.includes('add the load, then Run'), `line: …${ps.text.split('strain')[1]?.slice(-110)}`);
-ok(ps.phases.join(',').includes(`zero ${it0}-${ps.it}`) && ps.phases.includes(`locked ${ps.it}-null`), `phases ${ps.phases.join(' | ')}`);
-await page.click('#btn-lock'); await page.waitForTimeout(400);
-ps = await PS(); ok(!ps.any && ps.led === 'false' && !ps.box, 'Lock clicked: crossings free, light off');
-await page.click('#btn-lock'); await page.waitForTimeout(400);
-ps = await PS(); ok(ps.locked && ps.led === 'true' && ps.box, 'clicked again: locked, light on');
+ok(/reference at it \d+ · settle drift/.test(ps.text) && ps.text.includes('add the load, then Run'), `line: …${ps.text.split('strain')[1]?.slice(-110)}`);
+ok(ps.phases.join(',').includes(`zero ${it0}-${ps.it}`) && !ps.phases.some(p => p.startsWith('locked')), `phases ${ps.phases.join(' | ')}`);
 await W(() => { document.getElementById('sec-contact').open = true; });
+await page.check('#ck-locked'); await page.waitForTimeout(400);
+ps = await PS(); ok(ps.locked && ps.box && ps.phases.includes(`locked ${ps.it}-null`), '4 Contact box ticked: every crossing locked, locked band opens');
 await page.uncheck('#ck-locked'); await page.waitForTimeout(400);
-ps = await PS(); ok(!ps.any && ps.led === 'false', '4 Contact box unticked: the same lock, light off');
+ps = await PS(); ok(!ps.any && !ps.box, '4 Contact box unticked: crossings free');
 await page.check('#ck-locked'); await page.waitForTimeout(400);
 ps = await PS(); ok(ps.locked && ps.led === 'true', 'ticked: locked again');
 await W(() => { window.weavesim.selection = [[11, 5]]; });
