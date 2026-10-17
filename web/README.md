@@ -11,6 +11,7 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 | file | what it does |
 |---|---|
 | `index.html`, `style.css` | the app: status bar, solve / discretisation strip (pinned), sections 1 File … 10 Calibration, 3-D view with the navigation cube, the colour legend and the value labels, the Display sidebar (folds to a tab, docks left or right) — the idiom of the WeaveSim viewer, LocalSH and the Joint FEA apps |
+| `theory.html` | how the solver works, for reviewers and for readers without the maths (opened from *11 Theory* at the end of the menu): the Cosserat and Kirchhoff rod, second-order theory, the sliding contact point and reverse kinematics, the section-aware gap, friction, embedment, dynamic relaxation and its safeguards (the 17 Oct 2026 multiplier fix, pass-through) — every equation with its code location, interactive figures, light and dark, a plain-words reading mode; one self-contained page, KaTeX from `vendor/katex` |
 | `js/app.js` | scene / model management, panels, solve loop, picking (frames; whole laths for the lath groups), UTM replay, Rhino export |
 | `js/display_ui.js` | the Display sidebar: lath colouring and legend, member diagrams, joints overlay |
 | `js/disc_ui.js` | the discretisation: strip tab, section 8, plots, joints csv |
@@ -28,7 +29,7 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 | `js/wgsl.js`, `js/solver_gpu.js` | the same solver as WGSL kernels, B instances per dispatch (see *Precision* and *Batching*) |
 | `js/utm.js`, `js/calibrate.js` | UTM csv import, the replay protocols, objective, sensitivity, fit (Latin hypercube + Nelder–Mead or CMA-ES), validation, synthetic data, parameter sets |
 | `js/plot.js`, `js/colormap.js`, `js/navcube.js`, `js/rng.js` | plots (lines, dots, bars), colour maps and palettes (the Python viewer's: matplotlib maps, family / group / over-under colours), the view cube (from LocalSH), seeded random numbers |
-| `vendor/` | three.js r170 (+ OrbitControls, wide lines), rhino3dm.js 8.17 (MIT, McNeel) |
+| `vendor/` | three.js r170 (+ OrbitControls, wide lines), rhino3dm.js 8.17 (MIT, McNeel), KaTeX 0.16.47 (MIT; woff2 fonts only, for `theory.html`) |
 | `tests/` | Node checks against the Python reference, browser checks of the GPU solver, `selftest.html` (precision, reproducibility and throughput on your GPU) |
 
 ## Precision
