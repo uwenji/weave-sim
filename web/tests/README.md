@@ -28,6 +28,7 @@ node web/tests/paramset.mjs                   # parameter sets: units, transfer 
 node web/tests/calib_chaos.mjs 1e-9 8 relax   # objective spread of chaos replicas
 node web/tests/relax_check.mjs                # residual of the example's relaxation over 12 000 iterations
 node web/tests/slip_watch.mjs                 # which crossings keep slipping during that relaxation
+node web/tests/twist_watch.mjs [scene] [it] [every] [k=v,…]   # joint twist, Fn and multiplier growth over a long run (runaway check)
 python web/tests/python/disc_ref.py           # discretisation reference (solved state, components, energy)
 node web/tests/disc_check.mjs                 # discretisation / diagram node values / joints against it
 python web/tests/python/export_ref.py         # Python Rhino export of a solved state (needs pip install rhino3dm)

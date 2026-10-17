@@ -11,6 +11,16 @@ import { toFrame, fromFrameFast, qexp, qmul, qnormalize, rotBetween } from './qu
 import { fkey } from './topology.js';
 
 export const SUPPORT_SMOOTH = 0.03;                    // tanh width (≈1.7°) of the support-point sign
+// Roll rate limit of the segment frames: at most half the support-smoothing angle per iteration. The corner lever is a
+// bang-bang torque (±Fn·w/2 outside ±SUPPORT_SMOOTH); with the twist inertia set from the window stiffness a frame that
+// overshoots the window accelerates under the saturated torque and chatters ±3–5° for ever (the roll never settles, the
+// section gap D never closes). Bounding the roll step to half the window keeps the frame inside the linear core.
+export const TWIST_RATE_MAX = 0.5 * SUPPORT_SMOOTH;
+// Augmented Lagrangian safeguards (updateMultipliers): a crossing whose contact point sits on a fixed node (free weight
+// of the segment nodes below AL_FREE_MIN) carries no multiplier — its gap belongs to the support, an exact-gap demand
+// there cannot be met and the Uzawa step would ratchet λ for ever; and λ never exceeds the crushing capacity of the
+// face overlap, fc90·wA·wB/sinθ (beyond it the timber yields: the remaining penetration is embedment, not force).
+export const AL_FREE_MIN = 0.25;
 
 // numpy-style pairwise summation (the order np.sum uses), for the energy sums that steer kinetic damping
 export function pairwiseSum(a, lo = 0, n = a.length) {
@@ -245,6 +255,8 @@ export class PolylineContact {
     this.ctype = new Int32Array(K); this.faceSide = new Int32Array(K).fill(-1); this.phi = new Float64Array(2 * K); this.theta = new Float64Array(K);
     this.Anom = new Float64Array(K); this.pressure = new Float64Array(K); this.util = new Float64Array(K); this.Mrot = new Float64Array(K);
     this.mid = new Float64Array(3 * K);
+    this.penAcc = new Float64Array(K); this.penN = 0;      // penetration summed since the last multiplier update (its window mean drives the Uzawa step)
+    this.nodeFixed = new Uint8Array(st.n);                 // 1 = node fixed in all three translations (set from the anchors by the solver)
     this.energy = 0; this.ramp = 1.0; this.rotEnergy = 0; this.dentAfterDefault = 1500;
     // per-side evaluation scratch
     this.ev = [0, 1].map(() => ({ P: new Float64Array(3 * K), t: new Float64Array(3 * K), R: new Float64Array(9 * K), L: new Float64Array(K), seg: new Int32Array(K), tp: new Float64Array(K), a: new Int32Array(K), b: new Int32Array(K) }));
@@ -540,6 +552,7 @@ export class PolylineContact {
     this._prepare(st); this._eval(st, 0); this._eval(st, 1);
     const A = this.ev[0], B = this.ev[1];
     const kn = this.ramp * p.strength, kt = this.ramp * p.stick_strength, seat = p.seat_law !== 'off', aug = !!p.augmented;
+    const accum = st.iteration >= Math.max(p.ramp_iter | 0, 0);          // penetration window for the multiplier update: after the ramp only
     const n = new Float64Array(3 * K), FA = new Float64Array(3 * K), FB = new Float64Array(3 * K), rAx = new Float64Array(3 * K), rBx = new Float64Array(3 * K);
     const slipA = new Uint8Array(K), activeA = new Uint8Array(K), daA = new Float64Array(K), dbA = new Float64Array(K);
     const ePen = new Float64Array(K), eTan = new Float64Array(K);
@@ -564,6 +577,7 @@ export class PolylineContact {
       let D = hA + hB;
       if (seat && p.seat_gap) D -= this.dent[2 * c] + this.dent[2 * c + 1] + this.dentE[c];
       const pen = D - g;
+      if (accum) this.penAcc[c] += pen;
       let Fn = 0, active;
       if (aug) {
         const trial = st.lam[c] + kn * pen;
@@ -610,6 +624,7 @@ export class PolylineContact {
       eTan[c] = Se[0] * Se[0] + Se[1] * Se[1] + Se[2] * Se[2];
       tAs.push(tA); tBs.push(tB); Sts.push(St);
     }
+    if (accum) this.penN += 1;
     const cFace = this._classify(n);
     if (seat) for (let c = 0; c < K; c++) this._seatUpdate(st, c, slipA[c], daA[c], dbA[c], tAs[c], tBs[c], [n[3 * c], n[3 * c + 1], n[3 * c + 2]], this.Fn[c], cFace, activeA[c]);
     // distribute to the segment nodes with (1 − t, t), lever-arm torques on the segment frames
@@ -630,8 +645,33 @@ export class PolylineContact {
     this.energy = 0.5 * pairwiseSum(ePen) + 0.5 * kt * pairwiseSum(eTan) + (p.rot_friction ? this.rotEnergy : 0.0);
   }
 
-  /** Uzawa step of the augmented Lagrangian: λ ← max(0, λ + k_n·pen) (bilateral for locked knots) = the current Fn */
-  updateMultipliers(st) { for (let c = 0; c < this.K; c++) st.lam[c] = this.enabled[c] ? this.Fn[c] : 0; }
+  /** fixed-node mask from the anchors (nodeFree: 3 flags per node); a contact point on a fixed node gets no multiplier */
+  setFixed(nodeFree) { for (let i = 0; i < this.nodeFixed.length; i++) this.nodeFixed[i] = nodeFree[3 * i] || nodeFree[3 * i + 1] || nodeFree[3 * i + 2] ? 0 : 1; }
+  /** free weight of the contact point on `side`: (1 − t)² on the segment's first node + t² on its second, fixed nodes count 0 */
+  freeWeight(st, side, c) {
+    const [seg, t] = this._segment(st, side, c);
+    const a = st.segI0[seg], b = st.segI1[seg];
+    return (this.nodeFixed[a] ? 0 : (1 - t) * (1 - t)) + (this.nodeFixed[b] ? 0 : t * t);
+  }
+  /** crushing capacity of the face overlap at knot c: min fc90 · wA·wB / sinθ (upper bound of the multiplier) */
+  capForce(c) { return Math.min(this.fc90[2 * c], this.fc90[2 * c + 1]) * this.wk[2 * c] * this.wk[2 * c + 1] / Math.max(Math.sin(this.theta[c]), 1e-6); }
+  /** the safeguarded Uzawa value: λ ← max(0, λ + k_n·pen̄) (bilateral for locked knots), 0 at a support-controlled
+   *  crossing, |λ| ≤ cap; pen̄ = mean penetration over the window since the last update */
+  static alValue(lam, penMean, kn, locked, enabled, pinned, cap) {
+    if (!enabled || pinned) return 0;
+    let v = lam + kn * penMean;
+    if (!locked) v = Math.max(v, 0);
+    return Math.min(Math.max(v, -cap), cap);
+  }
+  /** Uzawa step of the augmented Lagrangian on the window-mean penetration, with the safeguards of alValue */
+  updateMultipliers(st) {
+    const kn = this.ramp * this.p.strength, n = Math.max(this.penN, 1);
+    for (let c = 0; c < this.K; c++) {
+      const pinned = this.freeWeight(st, 0, c) < AL_FREE_MIN || this.freeWeight(st, 1, c) < AL_FREE_MIN;
+      st.lam[c] = PolylineContact.alValue(st.lam[c], this.penAcc[c] / n, kn, this.locked[c], this.enabled[c], pinned, this.capForce(c));
+    }
+    this.penAcc.fill(0); this.penN = 0;
+  }
 }
 
 // ================================================================================================= Solver
@@ -682,7 +722,7 @@ export class CpuSolver {
       this.contact = this.useContacts && st.K ? new PolylineContact(this.topo, st, secOf, sc.contact, matOf) : null;
       if (this.contact) this.contact.dentAfterDefault = (sc.solver.warmup_iter | 0) + (sc.contact.ramp_iter | 0);
     }
-    if (this.contact) this.contact.p = sc.contact;
+    if (this.contact) { this.contact.p = sc.contact; this.contact.setFixed(this.anchors.nodeFree); this.contact.penAcc.fill(0); this.contact.penN = 0; }
     const n = st.n, m = st.m;
     const kNode = new Float64Array(n), kSeg = new Float64Array(m);
     this.beam.addStiffness(st, kNode, kSeg);
@@ -772,7 +812,7 @@ export class CpuSolver {
       Xprev.set(st.X); Qprev.set(st.Q);
       if (st.iteration < sp.warmup_iter && this.contact) { F.fill(0); st.V.fill(0); }
       for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) st.V[3 * i + k] += F[3 * i + k] / this.mass[i];
-      for (let j = 0; j < m; j++) st.Wt[j] += Tpar[j] / this.inertia[j];
+      for (let j = 0; j < m; j++) st.Wt[j] = Math.min(Math.max(st.Wt[j] + Tpar[j] / this.inertia[j], -TWIST_RATE_MAX), TWIST_RATE_MAX);
       if (sp.damping !== 1.0) { for (let i = 0; i < 3 * n; i++) st.V[i] *= sp.damping; for (let j = 0; j < m; j++) st.Wt[j] *= sp.damping; }
       for (let i = 0; i < 3 * n; i++) if (!An.nodeFree[i]) st.V[i] = 0;
       for (let j = 0; j < m; j++) if (!An.twistFree[j]) st.Wt[j] = 0;

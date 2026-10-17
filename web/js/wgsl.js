@@ -19,6 +19,8 @@ export function solverWGSL(L) {
 const N: u32 = ${u(L.N)}; const M: u32 = ${u(L.M)}; const P: u32 = ${u(L.P)}; const C: u32 = ${u(L.C)}; const K: u32 = ${u(L.K)};
 const NONE: u32 = 0xffffffffu;
 const SUPPORT_SMOOTH: f32 = 0.03;
+const TWIST_RATE_MAX: f32 = 0.015;      // 0.5 · SUPPORT_SMOOTH: roll step per iteration (solver_cpu.js)
+const AL_FREE_MIN: f32 = 0.25;          // free weight below which a contact point counts as support-controlled (no multiplier)
 const PI: f32 = 3.14159265358979;
 const HN: u32 = ${u(L.HN)};
 const NWG: u32 = ${u(L.NWG)};
@@ -50,6 +52,7 @@ const F_MROT = ${u(L.f.mrot)}; const F_MID = ${u(L.f.mid)}; const F_NAX = ${u(L.
 const F_REACT = ${u(L.f.react)}; const F_E = ${u(L.f.e)}; const F_LSEG = ${u(L.f.lseg)}; const F_R = ${u(L.f.r)}; const F_TN = ${u(L.f.tn)};
 const F_QN = ${u(L.f.qn)}; const F_TPAR = ${u(L.f.tpar)}; const F_INERT = ${u(L.f.inert)}; const F_EREF = ${u(L.f.eref)}; const F_C0 = ${u(L.f.c0)};
 const F_HIST = ${u(L.f.hist)}; const F_OUT = ${u(L.f.out)}; const NOUT = ${u(L.NOUT)};
+const F_PENACC = ${u(L.f.penacc)};
 // acc (atomic u32): fixed-point accumulators per instance
 const A_F = ${u(L.a.f)}; const A_T = ${u(L.a.t)}; const A_K = ${u(L.a.k)};
 
@@ -336,6 +339,12 @@ fn useg(b: u32, k: u32, side: u32) -> vec3<u32> {     // (segment, fraction bits
   return vec3<u32>(topo[T_KOFF + 2u * k + side] + i, fr, endf);
 }
 
+/** free weight of a contact point: (1 − t)² on the segment's first node + t² on its second; a node fixed in all three
+ *  translations counts 0 (PolylineContact.freeWeight) */
+fn free_weight(b: u32, e: Ev) -> f32 {
+  let fa = (ist[I_FIX + b * N + e.a] & 7u) == 7u; let fc = (ist[I_FIX + b * N + e.c] & 7u) == 7u;
+  return select((1.0 - e.tp) * (1.0 - e.tp), 0.0, fa) + select(e.tp * e.tp, 0.0, fc);
+}
 /** cubic Hermite (C¹) centreline on a side, in coordinates relative to node o; frame = nlerp of node frames */
 fn evalside(b: u32, k: u32, side: u32, o: u32, pinv: f32) -> Ev {
   let us = useg(b, k, side);
@@ -460,13 +469,28 @@ fn k_force(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let pr = ip[b];
     let enabled = topo[T_KEN + k] == 1u;
     let locked = ist[I_LOCK + kk] == 1u;
-    if (ctl[b].al_update == 1u) { fst[F_LAM + kk] = select(0.0, fst[F_FN + kk], enabled); }
     let ramp = ramp_of(b);
     let kn = ramp * pr.strength; let kt = ramp * pr.stick;
     let o = topo[T_SEG0 + useg(b, k, 0u).x];                      // stencil origin: first node of A's segment
     let A = evalside(b, k, 0u, o, pinv);
     let B = evalside(b, k, 1u, o, pinv);
     let tA = A.t; let tB = B.t;
+    let sinT = clamp(len_acc(cross(tA, tB)), 1e-6, 1.0);
+    let wA = geo[G_WK + 2u * k]; let wB = geo[G_WK + 2u * k + 1u]; let hA = geo[G_HK + 2u * k]; let hB = geo[G_HK + 2u * k + 1u];
+    let fcA = geo[G_FC90 + (b * K + k) * 2u]; let fcB = geo[G_FC90 + (b * K + k) * 2u + 1u];
+    if (ctl[b].al_update == 1u) {
+      // safeguarded Uzawa step (PolylineContact.alValue): window-mean penetration, no multiplier at a support-controlled
+      // crossing (contact point on a fixed node), |λ| ≤ the crushing capacity of the face overlap
+      let penMean = fst[F_PENACC + kk] / f32(max(pr.al_every, 1u));
+      let fwA = free_weight(b, A); let fwB = free_weight(b, B);
+      let pinned = fwA < AL_FREE_MIN || fwB < AL_FREE_MIN;
+      let cap = min(fcA, fcB) * wA * wB / sinT;
+      var lv = fst[F_LAM + kk] + kn * penMean;
+      if (!locked) { lv = max(lv, 0.0); }
+      lv = clamp(lv, -cap, cap);
+      fst[F_LAM + kk] = select(lv, 0.0, !enabled || pinned);
+      fst[F_PENACC + kk] = 0.0;
+    }
     var n = cross(tA, tB);
     let nn = len_acc(n);
     let np = ld3(F_NPREV + kk * 3u);
@@ -476,13 +500,13 @@ fn k_force(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let S = B.P - A.P;
     st3(F_MID + kk * 3u, pabs(b, o, false, pinv) + 0.5 * (A.P + B.P));
     let g = dot(S, n);
-    let wA = geo[G_WK + 2u * k]; let wB = geo[G_WK + 2u * k + 1u]; let hA = geo[G_HK + 2u * k]; let hB = geo[G_HK + 2u * k + 1u];
     let supA = support(A.R, n, 1.0, wA, hA); let supB = support(B.R, n, -1.0, wB, hB);
     var D = supA.w + supB.w;
     let seat = pr.seat == 1u;
     let od = F_DENT + kk * 2u;
     if (seat && pr.seat_gap == 1u) { D = D - (fst[od] + fst[od + 1u] + fst[F_DENTE + kk]); }
     let pen = D - g;
+    if (ctl[b].iter >= pr.ramp_iter) { fst[F_PENACC + kk] = fst[F_PENACC + kk] + pen; }
     var Fn = 0.0; var act = false;
     if (pr.aug == 1u) {
       let trial = fst[F_LAM + kk] + kn * pen;
@@ -549,14 +573,12 @@ fn k_force(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
       phiv[sd] = atan_acc(min(abs(nx), abs(ny)) / max(max(abs(nx), abs(ny)), 1e-12));
     }
     fst[F_PHI + kk * 2u] = phiv.x; fst[F_PHI + kk * 2u + 1u] = phiv.y;
-    let sinT = clamp(len_acc(cross(tA, tB)), 1e-6, 1.0);
     let theta = asin_acc(sinT);
     fst[F_THETA + kk] = theta;
     let nEdge = edge.x + edge.y;
     var faceSide = 3u;                                              // 3 = none (−1)
     if (nEdge == 1u) { faceSide = select(1u, 0u, edge.y == 1u); }
     let Fa = abs(Fn);
-    let fcA = geo[G_FC90 + (b * K + k) * 2u]; let fcB = geo[G_FC90 + (b * K + k) * 2u + 1u];
     var Aa = cface.x * cface.y / sinT;
     var pres = Fa / max(Aa, 1e-12);
     var util = pres / max(min(geo[G_HS + (b * K + k) * 2u], geo[G_HS + (b * K + k) * 2u + 1u]), 1e-12);
@@ -729,7 +751,7 @@ fn k_segint(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
     let q0 = ldqi(oq);
     let ow = F_W + b * M + j;
     let inert = fst[F_INERT + b * M + j];
-    var W = (fst[ow] + fst[F_TPAR + b * M + j] / inert) * pr.damping;
+    var W = clamp(fst[ow] + fst[F_TPAR + b * M + j] / inert, -TWIST_RATE_MAX, TWIST_RATE_MAX) * pr.damping;
     if (ist[I_TFIX + b * M + j] == 1u) { W = 0.0; }
     fst[ow] = W;
     // Q ← align(t0 → t1) · exp(W t0) · Q, applied as an increment: (1 + d2)(1 + d1) − 1 = d1 + d2 + d2 d1

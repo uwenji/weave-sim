@@ -159,6 +159,14 @@ interactive run and a calibration share it and the driver interleaves them.
   web version skips NaN.
 * In the Python sources on disk the augmented-Lagrangian gap (README, panels, `tree_cm.json`) is missing from
   `params.py` / `contact.py`; the web version implements it as the README describes (`augmented`, `al_every`).
+* 17 Oct 2026 — multiplier safeguards and roll rate limit (`solver_cpu.js` `PolylineContact.alValue`,
+  `TWIST_RATE_MAX`; `wgsl.js` contact kernel / `k_segint`; `solver_gpu.js` mirrors the update in `download`, state field
+  `penacc`): the Uzawa step uses the window-mean penetration, gives no multiplier to a crossing whose contact point sits
+  on a fixed node (free weight < `AL_FREE_MIN` = 0.25) and caps |λ| at fc90·wA·wB/sinθ; the segment frames roll by at
+  most SUPPORT_SMOOTH/2 per iteration (also in Python `core.py`). Before: λ at the pinned boundary knots ratcheted without
+  bound (`v5dome_BugTest.json`: Fn 3.5 kN → 400 kN in 100 k iterations, laths flipped and passed through each other;
+  `v5dome_cm` with AL on never converged). The Python reference dumps (`tests/python/dump_solver.py`) need regenerating
+  for the roll rate limit.
 * `UTMRef.from_dict` in the Python program drops `pad_stiffness`; the web version keeps it.
 
 An independent review of the calibration port against `calibrate.py` / `utm.py` / scipy found 12 differences, all

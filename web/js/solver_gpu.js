@@ -4,6 +4,7 @@
 // download() copies the GPU state back into it, so CpuSolver.results() / rebuildGoals() work on the GPU state.
 // See wgsl.js for the kernels and the precision scheme.
 import { solverWGSL } from './wgsl.js';
+import { PolylineContact, AL_FREE_MIN } from './solver_cpu.js';
 
 const WG = 64, HN = 4096, NOUT = 64, NCT = 32, NIP = 108;
 const TWO32 = 4294967296;
@@ -75,7 +76,7 @@ export class GpuSolver {
       ['dent', B * K * 2], ['dente', B * K], ['climb', B * K * 2], ['tanpsi', B * K * 2], ['fn', B * K], ['ft', B * K], ['gap', B * K], ['phi', B * K * 2], ['theta', B * K],
       ['anom', B * K], ['pres', B * K], ['util', B * K], ['mrot', B * K], ['mid', B * K * 3], ['nax', B * M], ['mj', B * P * 3], ['cm', B * C * 2], ['react', B * N * 3],
       ['e', B * M * 3], ['lseg', B * M], ['r', B * M * 9], ['tn', B * N * 3], ['qn', B * N * 4], ['tpar', B * M], ['inert', B * M], ['eref', B * M * 3], ['c0', B * M],
-      ['hist', B * HN * 8], ['out', B * NOUT * 4]]);
+      ['penacc', B * K], ['hist', B * HN * 8], ['out', B * NOUT * 4]]);
     L.a = alloc(L.aS = {}, [['f', B * N * 6], ['t', B * M * 6], ['k', B * M * 2]]);
     this.L = L;
     // ---- buffers
@@ -241,7 +242,7 @@ export class GpuSolver {
       const c = md.contact;
       F(f.nprev + b * K * 3, st.nPrev); F(f.lam + b * K, st.lam); F(f.th0 + b * K, Array.from(c.theta0, v => (Number.isNaN(v) ? 1e30 : v)));
       F(f.rslip + b * K, c.rotSlip); F(f.dent + b * K * 2, c.dent); F(f.dente + b * K, c.dentE); F(f.climb + b * K * 2, c.climb); F(f.tanpsi + b * K * 2, c.tanpsi);
-      F(f.fn + b * K, c.Fn);
+      F(f.fn + b * K, c.Fn); F(f.penacc + b * K, c.penAcc);
     }
     // control: iteration, kinetic-energy peak, flags; the protocol starts in its settle phase with increment 0
     const ct = new ArrayBuffer(NCT * 4), dv = new DataView(ct);
@@ -434,12 +435,20 @@ export class GpuSolver {
         ct.Anom[k] = fBuf[L.f.anom + kb]; ct.pressure[k] = fBuf[L.f.pres + kb]; ct.util[k] = fBuf[L.f.util + kb]; ct.Mrot[k] = fBuf[L.f.mrot + kb];
         ct.rotSlip[k] = fBuf[L.f.rslip + kb]; ct.dentE[k] = fBuf[L.f.dente + kb];
         const t0 = fBuf[L.f.th0 + kb]; ct.theta0[k] = t0 > 1e29 ? NaN : t0;
-        st.lam[k] = c.alUpdate ? (ct.enabled[k] ? ct.Fn[k] : 0) : fBuf[L.f.lam + kb];
         ct.locked[k] = iBuf[L.i.lock + kb];
+        // the GPU applies the multiplier update at the start of the next iteration: mirror it here (PolylineContact.alValue)
+        const acc = fBuf[L.f.penacc + kb], alN = Math.max(md.scene.contact.al_every | 0, 1);
+        if (c.alUpdate) {
+          const pinned = ct.freeWeight(st, 0, k) < AL_FREE_MIN || ct.freeWeight(st, 1, k) < AL_FREE_MIN;
+          st.lam[k] = PolylineContact.alValue(fBuf[L.f.lam + kb], acc / alN, md.scene.contact.strength, ct.locked[k], ct.enabled[k], pinned, ct.capForce(k));
+          ct.penAcc[k] = 0;
+        } else { st.lam[k] = fBuf[L.f.lam + kb]; ct.penAcc[k] = acc; }
         for (let q = 0; q < 2; q++) { ct.phi[2 * k + q] = fBuf[L.f.phi + kb * 2 + q]; ct.dent[2 * k + q] = fBuf[L.f.dent + kb * 2 + q]; ct.climb[2 * k + q] = fBuf[L.f.climb + kb * 2 + q]; ct.tanpsi[2 * k + q] = fBuf[L.f.tanpsi + kb * 2 + q]; }
         for (let q = 0; q < 3; q++) { st.nPrev[3 * k + q] = fBuf[L.f.nprev + kb * 3 + q]; ct.mid[3 * k + q] = fBuf[L.f.mid + kb * 3 + q]; }
       }
       ct.energy = c.eCont;
+      const rampN = Math.max(md.scene.contact.ramp_iter | 0, 0), alN = Math.max(md.scene.contact.al_every | 0, 1);
+      ct.penN = c.alUpdate ? 0 : (c.iter > rampN ? (c.iter - rampN) % alN : 0);
     }
     st.iteration = c.iter; st.residual = c.resid; md.kePrev = c.kePrev;
     md.converged = c.done === 1 && c.resid <= md.scene.solver.tol;
