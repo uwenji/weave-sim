@@ -162,6 +162,13 @@ interactive run and a calibration share it and the driver interleaves them.
   web version skips NaN.
 * In the Python sources on disk the augmented-Lagrangian gap (README, panels, `tree_cm.json`) is missing from
   `params.py` / `contact.py`; the web version implements it as the README describes (`augmented`, `al_every`).
+* 19 Oct 2026 — self-crossing strands: over / under is per frame (`kn.overSide`, helpers `overFrame` / `underFrame` /
+  `isOverFrame` in `topology.js`; `kn.over` stays the strand of the over frame). On the try-tri-weave torus
+  (`examples/meshes/genus1_torus_v6_696v.obj`) 1297 of 2088 crossings are a strand crossing itself; with the old
+  strand-based test both passes were lifted +h/2, started at gap 0 and the solver flipped the laths (twist 180°,
+  |disp| 19 on the CPU run). The weave now equals try-tri-weave's (`lattice.js traceStrands`) pass for pass — with
+  Weave › seed strand phase = 1 identically, with 0 as its mirror (the two programs start the first strand on
+  opposite sides). Check: `node web/tests/selfcross_check.mjs`; Python `tests/test_topology.py::test_self_crossings_torus`.
 * 17 Oct 2026 — multiplier safeguards and roll rate limit (`solver_cpu.js` `PolylineContact.alValue`,
   `TWIST_RATE_MAX`; `wgsl.js` contact kernel / `k_segint`; `solver_gpu.js` mirrors the update in `download`, state field
   `penacc`): the Uzawa step uses the window-mean penetration, gives no multiplier to a crossing whose contact point sits

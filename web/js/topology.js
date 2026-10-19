@@ -9,6 +9,20 @@ import { PySet } from './pyset.js';
 export const fkey = (s, k) => s * 1048576 + k;                     // frame id (s, k) → one number
 export const fsplit = (key) => [Math.floor(key / 1048576), key % 1048576];
 
+// Over / under is a property of a crossing's *frame*, not of a strand: on a closed or winding surface (torus, genus ≥ 1,
+// singular 5/7 vertices) a strand can cross itself — both frames of the knot belong to the same strand — so "strand s is
+// over" cannot tell the two passes apart. kn.overSide (0 = frame a, 1 = frame b) is the truth; kn.over (the strand of
+// the over frame) is kept for scene / report compatibility. Knots built without overSide (test fixtures) fall back to
+// kn.over.
+/** the frame [s, k] of knot kn that passes over (+normal side) */
+export function overFrame(kn) { const sd = kn.overSide ?? (kn.over === kn.a[0] ? 0 : 1); return sd ? kn.b : kn.a; }
+/** the frame of knot kn that passes under */
+export function underFrame(kn) { const o = overFrame(kn); return o === kn.a ? kn.b : kn.a; }
+/** set the over side of a knot (0 = a, 1 = b), keeping kn.over in step */
+function setOver(kn, side) { kn.overSide = side ? 1 : 0; kn.over = (side ? kn.b : kn.a)[0]; }
+/** true when the k-th knot along strand s is its over pass */
+export function isOverFrame(kn, s, k) { const f = overFrame(kn); return f[0] === s && f[1] === k; }
+
 // --- small vector helpers (f64, numpy-compatible formulas) ------------------------------------------------------
 const norm = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
 function normalize3(v, eps = 1e-12) { let n = norm(v[0], v[1], v[2]); if (n < eps) n = 1.0; return [v[0] / n, v[1] / n, v[2] / n]; }
@@ -44,7 +58,9 @@ export class Topology {
   get nKnots() { return this.knots.size; }
   hasFrame(s, k) { return this.frameToKnot.has(fkey(s, k)); }
   knotOf(s, k) { return this.knots.get(this.frameToKnot.get(fkey(s, k))); }
-  isOver(s, k) { const kn = this.knotOf(s, k); return kn ? kn.over === s : false; }
+  isOver(s, k) { const kn = this.knotOf(s, k); return kn ? isOverFrame(kn, s, k) : false; }
+  /** knots where a strand crosses itself (both frames on one strand) */
+  get selfCrossings() { let n = 0; for (const kn of this.knots.values()) if (kn.a[0] === kn.b[0]) n++; return n; }
   frameOrigin(s, k) { const r = this.knotNode.get(fkey(s, k)), P = this.polylines[s]; return [P[3 * r], P[3 * r + 1], P[3 * r + 2]]; }
   startFrames() { return this.strands.filter(s => !s.closed).map(s => [s.index, 0]); }
   endFrames() { return this.strands.filter(s => !s.closed).map(s => [s.index, s.edges.length - 1]); }
@@ -126,7 +142,7 @@ function traceStrands(topo) {
   for (const [e, fids] of passes) {
     if (fids.length !== 2) throw new Error(`edge ${e} visited ${fids.length} times; tracing invariant broken`);
     const [a, b] = fids;
-    topo.knots.set(e, { edge: e, a, b, over: a[0], conflict: false, flipped: false, isBoundary: !!mesh.isBoundaryEdge[e] });
+    topo.knots.set(e, { edge: e, a, b, over: a[0], overSide: 0, conflict: false, flipped: false, isBoundary: !!mesh.isBoundaryEdge[e] });
     topo.frameToKnot.set(fkey(a[0], a[1]), e);
     topo.frameToKnot.set(fkey(b[0], b[1]), e);
   }
@@ -177,9 +193,9 @@ function assignParity(topo) {
   let conflicts = 0;
   for (const kn of topo.knots.values()) {
     const [s, i] = kn.a, [t, j] = kn.b;
-    const overS = mod2(i + phi[s]) === 0, overT = mod2(j + phi[t]) === 0;
-    if (overS === overT) { kn.conflict = true; conflicts++; kn.over = s; }
-    else kn.over = overS ? s : t;
+    const overS = mod2(i + phi[s]) === 0, overT = mod2(j + phi[t]) === 0;   // per frame: also right when s === t
+    if (overS === overT) { kn.conflict = true; conflicts++; setOver(kn, 0); }
+    else setOver(kn, overS ? 0 : 1);
   }
   topo.parityConflicts = conflicts;
 }
@@ -189,7 +205,7 @@ function applyFlips(topo) {
     const e = topo.frameToKnot.get(fkey(f[0] | 0, f[1] | 0));
     if (e === undefined) continue;
     const kn = topo.knots.get(e);
-    kn.over = kn.over === kn.a[0] ? kn.b[0] : kn.a[0];
+    setOver(kn, overFrame(kn) === kn.a ? 1 : 0);
     kn.flipped = !kn.flipped;
   }
 }
@@ -205,7 +221,7 @@ function buildPolylines(topo) {
   for (const s of topo.strands) {
     const nk = s.edges.length;
     const Nn = s.edges.map(en);
-    const sign = s.edges.map(e => (topo.knots.get(e).over === s.index ? 1.0 : -1.0));
+    const sign = s.edges.map((e, k) => (isOverFrame(topo.knots.get(e), s.index, k) ? 1.0 : -1.0));   // per pass (self-crossings)
     const he = s.edges.map(e => (hOf && p.offset_mode === 'half_height' ? 0.5 * (+hOf(topo.knots.get(e).a[0]) + +hOf(topo.knots.get(e).b[0])) : h));
     const K = s.edges.map((e, k) => add3(mid(e), scl3(Nn[k], 0.5 * he[k] * sign[k])));
     const nodes = [], normals = [], knotRows = [];
@@ -355,7 +371,7 @@ export function toExportDict(topo) {
       polyline: Array.from({ length: topo.polylines[s.index].length / 3 }, (_, i) => Array.from(topo.polylines[s.index].slice(3 * i, 3 * i + 3))),
       knot_nodes: s.edges.map((_, k) => topo.knotNode.get(fkey(s.index, k))),
     })),
-    knots: [...topo.knots.values()].map(kn => ({ edge: kn.edge, a: kn.a, b: kn.b, over: kn.over, conflict: kn.conflict, flipped: kn.flipped, boundary: kn.isBoundary })),
+    knots: [...topo.knots.values()].map(kn => ({ edge: kn.edge, a: kn.a, b: kn.b, over: kn.over, over_frame: overFrame(kn), conflict: kn.conflict, flipped: kn.flipped, boundary: kn.isBoundary })),
     parity_conflicts: topo.parityConflicts,
   };
 }

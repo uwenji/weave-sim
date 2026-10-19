@@ -19,7 +19,7 @@
 import { nodeFrames, resolveSelector } from './model.js';
 import { nodeValues, strandSpan, arcLengths, discreteCurvature, interp, searchsorted, knotNodePairs, fmtG } from './fields.js';
 import { fixLabel } from './scene.js';
-import { fkey } from './topology.js';
+import { fkey, overFrame, underFrame } from './topology.js';
 
 export const UNITS = { mm: 'Millimeters', cm: 'Centimeters', m: 'Meters', in: 'Inches' };
 export const EXPORT_GROUP_COLORS = [[204, 168, 117], [77, 140, 191], [191, 102, 89], [115, 166, 102], [153, 115, 179]];
@@ -235,7 +235,7 @@ export async function exportRhino({ scene, topo, mesh = null, st = null, results
   if (opt.pre) {
     writeModel('WeaveSim::1 model (pre)', Xpre, Rpre);
     for (const [e, kn] of topo.knots) {
-      const p = topo.frameOrigin(kn.a[0], kn.a[1]), over = kn.a[0] === kn.over ? kn.a : kn.b, under = over === kn.a ? kn.b : kn.a;
+      const p = topo.frameOrigin(kn.a[0], kn.a[1]), over = overFrame(kn), under = underFrame(kn);
       w.point(p, 'WeaveSim::1 model (pre)::knots', `knot ${e}`, { knot: e, over: `${over[0]},${over[1]}`, under: `${under[0]},${under[1]}`, boundary: !!kn.isBoundary, flipped: !!kn.flipped }, [60, 60, 65]);
     }
   }

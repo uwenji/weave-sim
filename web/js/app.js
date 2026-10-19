@@ -6,7 +6,7 @@
 // top as in LocalSH, results and display on the sidebar.
 import { Scene, selectorLabel, fixLabel } from './scene.js';
 import { Mesh } from './mesh.js';
-import { buildTopology, fkey, fsplit } from './topology.js';
+import { buildTopology, fkey, fsplit, overFrame, underFrame } from './topology.js';
 import { UnitSystem } from './units.js';
 import { CpuSolver } from './solver_cpu.js';
 import { GpuSolver, getDevice } from './solver_gpu.js';
@@ -400,7 +400,7 @@ function frameAtPick(p) {
   if (p.kind === 'lath') return view.nearestFrame(p.strand, p.point);
   if (p.kind === 'knot') {
     const kn = A.topo.knots.get(A.model.st.knotEdges[p.c]);
-    const overF = kn.a[0] === kn.over ? kn.a : kn.b, underF = overF === kn.a ? kn.b : kn.a;
+    const overF = overFrame(kn), underF = underFrame(kn);
     return $('sel-knotpick').value === 'under' ? underF : overF;
   }
   return null;
@@ -479,10 +479,10 @@ function showTooltip(ev) {
   else { const f = view.nearestFrame(p.strand, p.point); if (f) { const nid = frameNode(f[0], f[1]); const P = view.dispX; if (Math.hypot(P[3 * nid] - p.point.x, P[3 * nid + 1] - p.point.y, P[3 * nid + 2] - p.point.z) < 1.5 * maxWidth()) c = A.model.st.knotEdges.indexOf(A.topo.frameToKnot.get(fkey(f[0], f[1]))); } }
   if (c >= 0) {
     const e = A.model.st.knotEdges[c], kn = A.topo.knots.get(e), u = A.scene.units;
-    const overF = kn.a[0] === kn.over ? kn.a : kn.b, underF = overF === kn.a ? kn.b : kn.a;
-    const flags = `${kn.isBoundary ? ' · boundary' : ''}${kn.flipped ? ' · flipped' : ''}${kn.conflict ? ' · <span class="warn">parity conflict</span>' : ''}`;
+    const overF = overFrame(kn), underF = underFrame(kn);
+    const flags = `${kn.a[0] === kn.b[0] ? ' · self-crossing' : ''}${kn.isBoundary ? ' · boundary' : ''}${kn.flipped ? ' · flipped' : ''}${kn.conflict ? ' · <span class="warn">parity conflict</span>' : ''}`;
     if (html.length) html.push('<hr>');
-    html.push(`<b>crossing ${e}</b> · over ${overF[0]} · under ${underF[0]}${flags}`);
+    html.push(`<b>crossing ${e}</b> · over ${overF[0]}${kn.a[0] === kn.b[0] ? ` (k ${overF[1]})` : ''} · under ${underF[0]}${kn.a[0] === kn.b[0] ? ` (k ${underF[1]})` : ''}${flags}`);
     const r = A.results;
     if (r && r.knot.Fn && r.knot.Fn.length) {
       html.push(`Fn <b>${fmt(r.knot.Fn[c], 3)}</b> ${u.force} · Ft <b>${fmt(r.knot.Ft[c], 3)}</b> ${u.force} · ${r.knot.state[c] ? '<span class="warn">slip</span>' : 'stick'}`);
