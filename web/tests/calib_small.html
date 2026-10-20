@@ -1,0 +1,63 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Calibration CPU vs GPU</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// The batched calibration path on a small self-contained case (no example files needed): a pressed crossing, two
+// force-mode probe tests (the crossing node of B pushed down, of A pushed up), replayed for two parameter vectors —
+// CalibrationSet.simulateBatch on the CPU (f64, one candidate after the other) and on the GPU (one batch). Reports the
+// probe travel of every increment on both backends and checks that a candidate gives bit-identical GPU replays in any
+// batch composition.   ?relax=1500 &step=300 &avg=100 &steps=3 &cycles=1 &fmax=30 &replicas=1
+import { CalibrationSet, Probe, Test } from '../js/calibrate.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { crossing } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+(async () => {
+  try {
+    const dev = await getDevice();
+    if (!dev) { log('NO WEBGPU'); return; }
+    const { sc, topo } = crossing({ load: -20, pull: 0 });
+    sc.contact.ramp_iter = 200; sc.solver.warmup_iter = 50;
+    const replay = { mode: 'force', relax_iter: +(q.get('relax') || 1500), step_iter: +(q.get('step') || 300), avg_iter: +(q.get('avg') || 100),
+      n_steps: +(q.get('steps') || 3), cycles: +(q.get('cycles') || 1), fit_cycles: [0], max_force: +(q.get('fmax') || 30), replicas: +(q.get('replicas') || 1) };
+    const tests = [new Test(new Probe([1, 1], [0, 0, -1], 'B_down')), new Test(new Probe([0, 1], [0, 0, 1], 'A_up'))];
+    const cs = CalibrationSet.fromModel(sc, topo, { params: { mu: [0.2, 0.6], stick_strength: [5e3, 2e4], E: [8e3, 1.2e4] }, tests, replay });
+    const a = { mu: 0.35, stick_strength: 1e4, E: 1e4 }, b = { mu: 0.5, stick_strength: 8e3, E: 9e3 };
+    log(`GpuSolver.cosserat ${GpuSolver.cosserat}; replay ${JSON.stringify(replay)}`);
+    let t0 = performance.now();
+    cs.setBackend('cpu'); const C = await cs.simulateBatch([a, b]);
+    const tc = (performance.now() - t0) / 1000;
+    cs.setBackend('gpu', dev);
+    t0 = performance.now(); const G1 = await cs.simulateBatch([a, b]); const tg = (performance.now() - t0) / 1000;
+    log(`CPU ${tc.toFixed(1)} s (2 candidates one after the other), GPU ${tg.toFixed(1)} s (one batch of ${2 * tests.length * replay.replicas} replay instances); scales ${JSON.stringify(cs._scales)}`);
+    const one = (r) => (Array.isArray(r) ? r[0] : r);
+    let worst = 0;
+    [a, b].forEach((v, p) => {
+      for (const t of tests) {
+        const bc = one(C[p])[t.name], bg = one(G1[p])[t.name];
+        const range = Math.max(...bc.flatMap(br => br.d.map(Math.abs)), 1e-12);    // the objective's normalisation: travel range
+        bc.forEach((br, i) => {
+          const g = bg[i];
+          const rel = br.d.map((d, k) => Math.abs(g.d[k] - d) / range);
+          for (let k = 1; k < rel.length; k++) worst = Math.max(worst, rel[k]);
+          log(`  ${JSON.stringify(v)} ${t.name.padEnd(6)} c${br.cycle} ${br.branch.padEnd(6)} F ${br.f.map(f => f.toFixed(1)).join(' ')}\n      travel CPU ${br.d.map(x => x.toFixed(6)).join(' ')}\n      travel GPU ${g.d.map(x => x.toFixed(6)).join(' ')}   max |Δ|/range ${Math.max(...rel.slice(1)).toExponential(2)}`);
+        });
+      }
+    });
+    log(`largest travel difference GPU vs CPU, relative to the test's travel range: ${worst.toExponential(2)}`);
+    // yardstick: the CPU against itself with the start positions perturbed by 1e-9 × size (replica 1 of the chaos ensemble)
+    const cs2 = CalibrationSet.fromModel(sc, topo, { params: cs.params, tests, replay: { ...replay, replicas: 2, perturb: 1e-9, replica_stage: 'relax' } });
+    const [R2] = await cs2.simulateBatch([a]);
+    let wr = 0;
+    for (const t of tests) {
+      const range = Math.max(...R2[0][t.name].flatMap(br => br.d.map(Math.abs)), 1e-12);
+      R2[0][t.name].forEach((br, i) => { const g = R2[1][t.name][i]; for (let k = 1; k < br.d.length; k++) wr = Math.max(wr, Math.abs(g.d[k] - br.d[k]) / range); });
+    }
+    log(`yardstick, CPU vs CPU with the start perturbed by 1e-9 × size (candidate a): largest travel difference / range ${wr.toExponential(2)}`);
+    const G2 = await cs.simulateBatch([b, a]), G3 = await cs.simulateBatch([a]);
+    const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+    log(`determinism across batches: a ${same(G1[0], G2[1]) && same(G1[0], G3[0]) ? 'bit-identical in [a, b], [b, a], [a]' : 'DIFFERENT'}; b ${same(G1[1], G2[0]) ? 'bit-identical in [a, b], [b, a]' : 'DIFFERENT'}`);
+  } catch (e) { log('ERROR ' + e.message + '\n' + e.stack); }
+  finally { window.__done = true; }
+})();
+</script></body></html>

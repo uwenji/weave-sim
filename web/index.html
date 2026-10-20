@@ -26,53 +26,18 @@
     <button id="st-backend" class="st pill" title="solver backend — click to switch">…</button>
   </header>
 
-  <aside id="panel">
-    <!-- solve strip: pinned, never folds -->
-    <div id="strip">
-      <div class="row" id="strip-head">
-        <div class="seg small" id="strip-tabs" role="tablist" aria-label="Strip"><button data-tab="solve" aria-pressed="true">Solver</button><button data-tab="disc" aria-pressed="false">Discretisation</button></div>
-        <span class="spacer"></span>
-        <select id="sel-chart" title="what the strip plots">
-          <option value="energy">energy · residual</option>
-          <option value="parts">energy parts</option>
-          <option value="utm">probe force–travel</option>
-        </select>
-      </div>
-      <div id="strip-solve">
-        <div class="row buttons" id="strip-buttons">
-          <button id="btn-run" class="btn primary" title="run / pause (Space)">Run</button>
-          <button id="btn-step" class="btn" title="advance the given number of iterations">Step</button>
-          <input type="number" id="nb-step" class="num sm" min="1" step="100" value="500" title="iterations per Step">
-          <button id="btn-reset" class="btn" title="restart from the woven geometry">Reset</button>
-        </div>
-        <div class="row buttons" id="strip-protocol" role="group" aria-label="fastened-structure protocol">
-          <button id="btn-zero" class="btn proto" title="Zero (after relaxing): the current geometry becomes the reference (displacement and slip restart from zero) and the solver settles for the given iterations — the drift shows under the chart; then the settled state becomes the reference and the solver pauses. Add the load and Run: Results › delta is the load displacement. Fastened joints: tick 'lock all crossings' in 4 Contact. Click while it settles to stop.">Zero</button>
-          <input type="number" id="nb-zero-steps" class="num sm" min="0" step="100" value="1000" title="settle iterations after Zero (0 = zero at once)">
-        </div>
-        <div id="chart-legend" class="mono"></div>
-        <canvas id="chart"></canvas>
-        <div id="strip-text" class="readout">no model</div>
-      </div>
-      <div id="strip-disc" hidden>
-        <div class="row buttons">
-          <button id="btn-disc-run" class="btn primary" title="run / pause the joint placement (simulated annealing)">Run</button>
-          <button id="btn-disc-step" class="btn" title="advance the given number of temperature steps">Step</button>
-          <input type="number" id="nb-disc-step" class="num sm" min="1" step="10" value="20" title="temperature steps per Step">
-          <button id="btn-disc-reset" class="btn" title="remove the joints; the next Run starts from equal pieces">Reset</button>
-        </div>
-        <div id="disc-legend" class="mono"><span class="lg c2">current</span><span class="lg c1">best</span><span class="dim">weighted objective per temperature step</span></div>
-        <canvas id="disc-chart"></canvas>
-        <div id="disc-text" class="readout">cuts the laths into stock-length pieces on the current geometry (solved if you ran the solver); results feed the structural objective — 8 Discretisation</div>
-      </div>
+  <aside id="panel" aria-label="Setup">
+    <div class="side-head" id="setup-head">
+      <button id="setup-toggle" class="side-toggle" aria-expanded="true" title="show / hide the setup"><span class="chev"></span><span class="t">Setup</span></button>
     </div>
-
-    <div id="sections">
-    <details class="sec" id="sec-file" open>
+    <div id="sections" class="side-body">
+    <details class="sec" name="setup" id="sec-file" open>
       <summary><span class="chev"></span><h2>1 File</h2><span class="sum" id="sum-file"></span></summary>
       <div class="body">
         <div class="row">
           <label for="sel-example">example</label>
           <select id="sel-example"><option value="">—</option></select>
+          <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Open a scene.json together with its mesh (select both, or drop them on the view). A mesh alone starts a new scene with the default settings.">i</button>
         </div>
         <div class="row buttons">
           <label class="btn file"><input type="file" id="file-scene" accept=".json,.stl,.obj" multiple hidden>Open scene / mesh…</label>
@@ -80,7 +45,6 @@
           <button id="btn-export-results" class="btn">Export results</button>
           <button id="btn-shot" class="btn">Screenshot</button>
         </div>
-        <p class="hint">scene.json with its mesh (select both, or drop them on the view); a mesh alone starts a new scene with the defaults. Scenes are the Python program's files — same knot, strand and frame ids.</p>
         <div class="readout" id="ro-file">—</div>
         <h3>Rhino</h3>
         <div class="row buttons"><button id="btn-3dm" class="btn" title="Rhino 7 file + a .3dm.json index of the object ids">Export Rhino .3dm</button><span class="readout inline" id="ro-3dm"></span></div>
@@ -93,13 +57,13 @@
             <label class="check"><input type="checkbox" data-x3dm="supports" checked> supports &amp; loads</label>
             <label class="check"><input type="checkbox" data-x3dm="input_mesh" checked> input mesh</label>
             <label class="check"><input type="checkbox" data-x3dm="nurbs" checked> nurbs</label>
+            <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Layers by lath group; user text on every object (strand, group, family, values). Result layers, diagrams, contact forces and reactions need a solved state.">i</button>
           </div>
-          <p class="hint">layers by lath group, user text on every object (strand, group, family, values) — the same file the Python program writes. Result layers, diagrams, contact forces and reactions need a solved state.</p>
         </details>
       </div>
     </details>
 
-    <details class="sec" id="sec-weave">
+    <details class="sec" name="setup" id="sec-weave">
       <summary><span class="chev"></span><h2>2 Weave</h2><span class="sum" id="sum-weave"></span></summary>
       <div class="body">
         <div class="row"><label for="nb-subdiv" class="w">subdivisions / span</label><input type="number" id="nb-subdiv" class="num" min="1" step="1"></div>
@@ -115,7 +79,7 @@
       </div>
     </details>
 
-    <details class="sec" id="sec-material">
+    <details class="sec" name="setup" id="sec-material">
       <summary><span class="chev"></span><h2>3 Units &amp; material</h2><span class="sum" id="sum-material"></span></summary>
       <div class="body">
         <div class="row">
@@ -152,7 +116,7 @@
             <label for="nb-fc90">fc90 crushing <span class="unit u-stress"></span></label><input type="number" id="nb-fc90" class="num" step="any" data-bind="material.fc90">
             <label for="nb-H">H side hardness <span class="unit u-stress"></span></label><input type="number" id="nb-H" class="num" step="any" data-bind="material.H">
           </div>
-          <p class="hint">used by the contact-type / pressure layers and the seat law (4 Contact)</p>
+          <div class="row end"><button type="button" class="info" aria-label="About this" data-tip="Used by the contact-type and pressure colour layers and by the seat law (4 Contact).">i</button></div>
         </details>
         <details class="sub">
           <summary>override Ix / Iy / J</summary>
@@ -166,7 +130,8 @@
         <div class="readout" id="ro-section">—</div>
         <details class="sub" open>
           <summary>active beam</summary>
-          <div class="row"><label for="sel-beammode" class="w">mode</label><select id="sel-beammode"><option value="simple">simple</option><option value="advanced">advanced</option></select></div>
+          <div class="row"><label for="sel-beammode" class="w">mode</label><select id="sel-beammode"><option value="simple">simple</option><option value="advanced">advanced</option></select>
+            <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Each lath is a Cosserat rod: bending about both axes, twist, stretch and shear (κGA), with the roll moment of anisotropic bending, so lateral–torsional coupling is included.\nActivation 1 = flat rest state (full active bending), 0 = as built (no prestress).\nMaterial, beam and loads apply to a running solve; section changes rebuild the model.">i</button></div>
           <div id="beam-simple">
             <div class="row slider"><label for="sl-act">activation</label><input type="range" id="sl-act" min="0" max="1" step="0.01" data-bind="beam.activation"><output id="out-act" class="mono"></output></div>
             <div class="row slider"><label for="sl-stiff">stiffness ×</label><input type="range" id="sl-stiff" min="0.1" max="5" step="0.01" data-bind="beam.stiffness"><output id="out-stiff" class="mono"></output></div>
@@ -179,13 +144,13 @@
             <div class="row slider"><label for="sl-ke">EIy × (edge)</label><input type="range" id="sl-ke" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_edge"><output class="mono"></output></div>
             <div class="row slider"><label for="sl-kt">GJ × (twist)</label><input type="range" id="sl-kt" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_twist"><output class="mono"></output></div>
             <div class="row slider"><label for="sl-ka">EA × (axial)</label><input type="range" id="sl-ka" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_axial"><output class="mono"></output></div>
+            <div class="row slider"><label for="sl-kga">κGA × (shear)</label><input type="range" id="sl-kga" min="0.1" max="5" step="0.01" data-bind="beam.stiffness_shear"><output class="mono"></output></div>
           </div>
-          <p class="hint">activation 1 = flat rest state (full active bending), 0 = as built (no prestress). Material, beam and loads apply live; section changes rebuild the model.</p>
         </details>
       </div>
     </details>
 
-    <details class="sec" id="sec-contact">
+    <details class="sec" name="setup" id="sec-contact">
       <summary><span class="chev"></span><h2>4 Contact</h2><span class="sum" id="sum-contact"></span></summary>
       <div class="body">
         <div class="row slider"><label for="sl-mu">μ friction</label><input type="range" id="sl-mu" min="0" max="1" step="0.01" data-bind="contact.mu"><output class="mono"></output></div>
@@ -211,13 +176,13 @@
             <label for="nb-dentafter">dents after it (−1 auto)</label><input type="number" id="nb-dentafter" class="num" step="1" data-bind="contact.dent_after_iter" data-int>
             <label for="nb-edgethr">edge threshold</label><input type="number" id="nb-edgethr" class="num" step="0.01" data-bind="contact.edge_threshold">
           </div>
-          <p class="hint">rotational friction and the seat law apply on Reset. Results › ctype · pressure · util · dent · M_rot</p>
+          <div class="row end"><button type="button" class="info" aria-label="About this" data-tip="Rotational (scissor) friction and the seat law apply on Reset. Their colour layers: ctype, pressure, util, dent, M_rot.">i</button></div>
         </details>
         <div class="readout" id="ro-contact">—</div>
       </div>
     </details>
 
-    <details class="sec" id="sec-loads">
+    <details class="sec" name="setup" id="sec-loads">
       <summary><span class="chev"></span><h2>5 Loads</h2><span class="sum" id="sum-loads"></span></summary>
       <div class="body">
         <div class="row"><label class="check"><input type="checkbox" id="ck-grav"> gravity (self-weight)</label>
@@ -238,7 +203,7 @@
       </div>
     </details>
 
-    <details class="sec" id="sec-anchors">
+    <details class="sec" name="setup" id="sec-anchors">
       <summary><span class="chev"></span><h2>6 Anchors</h2><span class="sum" id="sum-anchors"></span></summary>
       <div class="body">
         <div class="readout sel-readout"></div>
@@ -256,17 +221,17 @@
       </div>
     </details>
 
-    <details class="sec" id="sec-solve">
+    <details class="sec" name="setup" id="sec-solve">
       <summary><span class="chev"></span><h2>7 Solve</h2><span class="sum" id="sum-solve"></span></summary>
       <div class="body">
         <div class="row">
           <label>backend</label>
           <div class="chips inline" id="backend-chips"><button class="chip" data-backend="webgpu">WebGPU</button><button class="chip" data-backend="cpu">CPU f64</button></div>
           <button id="btn-polish" class="btn sm" title="continue from the current state on the CPU in double precision until the residual is below the tolerance">f64 polish</button>
+          <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="WebGPU: f32 arithmetic with exact fixed-point sums; CPU: double precision, the reference. f64 polish finishes a GPU solve on the CPU.\nConverged when the unbalanced force (and frame torque) falls below the tolerance.\nRun, Step, Reset and Zero are in the Monitor.">i</button>
         </div>
         <div class="readout" id="ro-backend">—</div>
         <div class="grid2">
-          <label for="nb-maxit">max iterations</label><input type="number" id="nb-maxit" class="num" step="100" data-bind="solver.max_iter" data-int>
           <label for="nb-tol">tolerance</label><input type="number" id="nb-tol" class="num" step="any" data-bind="solver.tol">
           <label for="nb-every">refresh every</label><input type="number" id="nb-every" class="num" step="1" data-bind="solver.live_every" data-int>
           <label for="nb-ms">mass scale</label><input type="number" id="nb-ms" class="num" step="any" data-bind="solver.mass_scale">
@@ -275,14 +240,13 @@
         </div>
         <div class="row"><label class="check"><input type="checkbox" id="ck-kd" data-bind="solver.kinetic_damping"> kinetic damping</label>
           <label for="sel-prestress">prestress ref</label><select id="sel-prestress" data-bind="solver.prestress"><option value="flat">flat</option><option value="asbuilt">asbuilt</option></select></div>
-        <p class="hint">load-test protocol (relax → Zero → add the load → Run → Results › delta): in the strip, under Run; tick the box above for fastened joints</p>
       </div>
     </details>
 
-    <details class="sec" id="sec-disc">
+    <details class="sec" name="setup" id="sec-disc">
       <summary><span class="chev"></span><h2>8 Discretisation</h2><span class="sum" id="sum-disc"></span></summary>
       <div class="body">
-        <p class="hint">joint placement along the laths by simulated annealing (Python: discretize.py) — Run / Step / Reset in the strip's Discretisation tab. The cuts sit on the current geometry; with a solve the structural objective keeps joints away from high moments.</p>
+        <div class="row end"><button type="button" class="info" aria-label="About this" data-tip="Joint placement along the laths by simulated annealing — run it in the Monitor (Discretisation). The cuts sit on the current geometry; after a solve the structural objective keeps joints away from high moments.">i</button></div>
         <div class="grid2">
           <label for="nb-dmax">stock length <span class="unit u-len"></span></label><input type="number" id="nb-dmax" class="num" step="any" data-disc="max_length">
           <label for="nb-djoint">joint length <span class="unit u-len"></span></label><input type="number" id="nb-djoint" class="num" step="any" data-disc="joint_length">
@@ -300,17 +264,16 @@
         </details>
         <h3>objective weights (0 … 1)</h3>
         <div id="disc-weights"></div>
-        <canvas id="disc-comp" class="plot sm"></canvas>
-        <canvas id="disc-pieces" class="plot sm"></canvas>
         <h3>joints</h3>
         <div class="row buttons"><span class="readout inline" id="ro-joints">none</span><span class="spacer"></span><button id="btn-joints-csv" class="btn sm" disabled>export joints (csv)</button></div>
       </div>
     </details>
 
-    <details class="sec" id="sec-utm">
+    <details class="sec" name="setup" id="sec-utm">
       <summary><span class="chev"></span><h2>9 UTM test</h2><span class="sum" id="sum-utm"></span></summary>
       <div class="body">
-        <div class="row buttons"><button id="btn-probemode" class="btn toggle">Pick probe…</button><span class="readout inline" id="ro-probe">no probe</span></div>
+        <div class="row buttons"><button id="btn-probemode" class="btn toggle">Pick probe…</button><span class="readout inline" id="ro-probe">no probe</span>
+          <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Pick the probe crossing, open the UTM csv and Replay: the measured and the replayed force–travel curves are plotted in the Monitor (Probe · UTM).">i</button></div>
         <div class="row"><label>axis</label><input type="number" id="nb-ax" class="num xs" step="any" value="0"><input type="number" id="nb-ay" class="num xs" step="any" value="0"><input type="number" id="nb-az" class="num xs" step="any" value="-1"></div>
         <div class="row buttons"><label class="btn file"><input type="file" id="file-utm" accept=".csv,.txt" hidden>Open UTM csv…</label>
           <span class="readout inline" id="ro-utmfile">no curve</span></div>
@@ -319,12 +282,11 @@
         <h3>replay on the model</h3>
         <div class="grid2" id="grid-replay"></div>
         <div class="row buttons"><button id="btn-replay" class="btn primary">Replay test</button><button id="btn-replay-stop" class="btn" disabled>Stop</button></div>
-        <canvas id="utm-plot" class="plot"></canvas>
         <div class="readout" id="ro-utm">—</div>
       </div>
     </details>
 
-    <details class="sec" id="sec-calib">
+    <details class="sec" name="setup" id="sec-calib">
       <summary><span class="chev"></span><h2>10 Calibration</h2><span class="sum" id="sum-calib"></span></summary>
       <div class="body" id="calib-body"></div>
     </details>
@@ -357,13 +319,13 @@
     <div id="drop" hidden>drop scene.json + mesh, a mesh, a UTM csv or calibration files</div>
   </main>
 
-  <!-- display tools: a sidebar at the side of the view that folds to a narrow tab (the Joint FEA idiom) -->
-  <aside id="display">
-    <div id="display-head">
-      <button id="display-toggle" title="show / hide the display tools"><span class="chev"></span><span class="t">Display</span></button>
+  <!-- display tools: how the model is drawn (colour, diagram, view); a sidebar beside the view that folds to a narrow tab -->
+  <aside id="display" aria-label="Display">
+    <div class="side-head" id="display-head">
+      <button id="display-toggle" class="side-toggle" title="show / hide the display tools"><span class="chev"></span><span class="t">Display</span></button>
       <button id="display-dock" class="nbtn" title="move the sidebar to the other side of the view">⇄</button>
     </div>
-    <div class="body">
+    <div class="body side-body">
       <h2>Colour</h2>
       <div class="row"><label for="sel-colour" class="w">laths by</label>
         <select id="sel-colour">
@@ -395,11 +357,7 @@
         <div class="row slider" id="row-zone" hidden><label for="sl-zone">± crossings</label><input type="range" id="sl-zone" min="1" max="6" step="1" value="3"><output id="out-zone" class="mono">3</output></div>
       </div>
 
-      <h2>Extremes</h2>
-      <div class="readout" id="ro-extremes">no results yet</div>
-      <div class="row buttons"><button id="btn-refresh-results" class="btn sm">Refresh</button><span class="readout inline" id="sum-results"></span></div>
-
-      <h2>View</h2>
+      <h2 class="with-info">View <button type="button" class="info" aria-label="About this" data-tip="Click a lath next to a crossing to select that frame (shift adds / removes); Esc clears. Hover a crossing for its forces.\nDrag: orbit · right-drag: pan · wheel: zoom. Keys H, F, T, P; Space runs.">i</button></h2>
       <div class="row"><label>theme</label>
         <div class="chips inline" id="theme-chips"><button class="chip on" data-theme="auto">auto</button><button class="chip" data-theme="light">light</button><button class="chip" data-theme="dark">dark</button></div></div>
       <div class="chips" id="layer-chips">
@@ -412,10 +370,141 @@
       <div class="row slider"><label for="sl-arrow">arrow scale</label><input type="range" id="sl-arrow" min="0.2" max="4" step="0.1" value="1"><output id="out-arrow" class="mono">1.0</output></div>
       <div class="row slider"><label for="sl-turn">turntable °/s</label><input type="range" id="sl-turn" min="1" max="60" step="1" value="12"><output id="out-turn" class="mono">12</output></div>
       <div class="row"><label for="sel-knotpick" class="w">knot dot picks</label><select id="sel-knotpick"><option value="over">over strand</option><option value="under">under strand</option></select></div>
-      <p class="hint">click a lath next to a crossing to select that frame (shift adds / removes) · Esc clears · hover a crossing for its forces · drag: orbit · right-drag: pan · wheel: zoom · keys H F T P, Space runs</p>
     </div>
   </aside>
+  <!-- monitor: run controls and everything that is plotted while the model solves; folds to a narrow tab, docks on
+       either side of the view, widens by its inner edge (two chart columns from ~580 px) -->
+  <aside id="monitor" aria-label="Monitor">
+    <div class="side-head" id="monitor-head">
+      <button id="monitor-toggle" class="side-toggle" aria-expanded="true" title="show / hide the monitor"><span class="chev"></span><span class="t">Monitor</span></button>
+      <button id="monitor-mini" class="mini-run" title="Run / pause (Space)" aria-label="Run"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="ic-run" d="M3 1.8v8.4L10 6z"/><path class="ic-pause" d="M2.6 2h2.3v8H2.6zM7.1 2h2.3v8H7.1z"/></svg></button>
+      <button id="monitor-dock" class="nbtn" title="move the monitor to the other side of the view">⇄</button>
+    </div>
+    <div id="runbar">
+      <div class="row buttons">
+        <button id="btn-run" class="btn primary" title="run / pause (Space)">Run</button>
+        <button id="btn-step" class="btn" title="advance the given number of iterations">Step</button>
+        <input type="number" id="nb-step" class="num sm" min="1" step="100" value="500" title="iterations per Step" aria-label="iterations per Step">
+        <span class="spacer"></span>
+        <button id="btn-reset" class="btn reset" title="Reset: back to the woven geometry">Reset</button>
+      </div>
+      <div class="row buttons">
+        <label for="nb-maxit" class="lbl">max</label><input type="number" id="nb-maxit" class="num" step="100" data-bind="solver.max_iter" data-int title="iterations per Run">
+        <span class="spacer"></span>
+        <button id="btn-zero" class="btn proto" title="Zero: the current state becomes the reference, then the solver settles and pauses (click again while it settles to stop)">Zero</button>
+        <input type="number" id="nb-zero-steps" class="num sm" min="0" step="100" value="1000" title="settle iterations after Zero (0 = zero at once)" aria-label="settle iterations after Zero">
+        <button type="button" class="info" aria-label="About this" data-tip="Run / Pause (Space) solves up to max iterations; Step advances n.\nReset restarts from the woven geometry: the solve, its history, the followed values and the Zero reference are discarded (needed after Weave changes).\nZero takes the current state as the reference (displacement and slip restart from zero), lets the solver settle for n iterations and pauses: add the load, Run, and colour by delta for the load displacement. Fastened joints: lock all crossings in 4 Contact.">i</button>
+      </div>
+      <div id="conv-meter" class="meter idle" role="meter" aria-label="convergence: decades of residual still to go to the tolerance" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="track"><div class="fill"></div><div class="ticks"></div></div></div>
+      <div id="run-text" class="readout">no model</div>
+    </div>
+    <div class="side-body" id="monitor-body">
+      <details class="sec mon" id="mon-solver" open>
+        <summary><span class="chev"></span><h2>Solver</h2><span class="sum" id="sum-mon-solver"></span></summary>
+        <div class="body">
+          <div class="cards">
+            <figure class="card" id="card-conv">
+              <figcaption class="card-head"><span class="card-title">Convergence</span><span class="card-unit">log</span><span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Residual: the largest unbalanced force (and frame torque / l_min) relative to the reference force — the solve has converged below the tolerance (dashed).\nKinetic energy relative to its maximum: it drops to zero at every kinetic-damping restart.\nBands: relax, zero (settle) and locked phases.">i</button></figcaption>
+              <div class="lgd" id="lg-conv"></div>
+              <canvas id="chart-conv" class="cv" tabindex="0" aria-label="convergence chart: residual and kinetic energy over the iterations"></canvas>
+            </figure>
+            <figure class="card" id="card-energy">
+              <figcaption class="card-head"><span class="card-title">Energy</span><span class="card-unit" id="unit-energy"></span></figcaption>
+              <div class="lgd" id="lg-energy"></div>
+              <canvas id="chart-energy" class="cv" tabindex="0" aria-label="energy chart: total and parts over the iterations"></canvas>
+            </figure>
+          </div>
+          <div class="row mon-foot"><span class="lbl">history</span><div class="seg small" id="seg-hist" role="group" aria-label="history shown"><button data-h="win" aria-pressed="true">last 4000</button><button data-h="all" aria-pressed="false">all</button></div></div>
+        </div>
+      </details>
+      <details class="sec mon" id="mon-knots" open>
+        <summary><span class="chev"></span><h2>Knots</h2><span class="sum" id="sum-mon-knots"></span></summary>
+        <div class="body">
+          <div id="knot-bar">
+            <div class="row buttons">
+              <button id="btn-knotpick" class="btn sm toggle" title="click crossings in the view to follow them (up to 8); click again to remove">Pick knots</button>
+              <button id="btn-knotsel" class="btn sm" title="follow the crossings of the selected frames">+ selection</button>
+              <button id="btn-knotclear" class="btn sm" title="stop following all crossings">Clear</button>
+              <span class="spacer"></span>
+              <button type="button" class="info" aria-label="About this" data-tip="Follow up to 8 crossings: Pick knots, then click crossings in the view (+ selection takes the crossings of the selected frames).\nEvery chart plots one quantity for all followed crossings against the shared x; hover for the values. Against the iteration, the crosshair is shared with the solver charts.">i</button>
+            </div>
+            <div id="knot-chips"></div>
+          </div>
+          <div id="knot-cards" class="cards"></div>
+          <div class="row buttons mon-foot"><label for="sel-knotx" class="lbl">against</label><select id="sel-knotx" title="the shared x axis of the knot charts"></select>
+            <span class="spacer"></span><button id="btn-knotadd" class="btn sm" title="another chart for the followed crossings">+ chart</button><span class="readout inline" id="knot-count"></span></div>
+          <div id="knot-text" class="readout"></div>
+        </div>
+      </details>
+      <details class="sec mon" id="mon-stab">
+        <summary><span class="chev"></span><h2>Stability</h2><span class="sum" id="sum-mon-stab"></span></summary>
+        <div class="body">
+          <div class="row buttons">
+            <button id="btn-stab" class="btn sm" title="the softest mode of the tangent stiffness of the current state">Check now</button>
+            <label class="check" title="check the stability at the end of every Run / Step"><input type="checkbox" id="ck-stabauto"> after every run</label>
+            <span class="spacer"></span>
+            <button type="button" class="info" aria-label="About this" data-tip="The softest mode of the tangent stiffness at the current state, relative to the first check: it falls to 0 at a limit point or a bifurcation (buckling) and is negative when the state is unstable.\nEach check takes a few hundred force evaluations of the current state; the solve is not changed.">i</button>
+          </div>
+          <figure class="card" id="card-stab">
+            <figcaption class="card-head"><span class="card-title">Softest mode λ / |λ₀|</span></figcaption>
+            <canvas id="chart-stab" class="cv" tabindex="0" aria-label="stability chart: softest mode over the checks"></canvas>
+          </figure>
+          <div id="stab-text" class="readout"></div>
+        </div>
+      </details>
+      <details class="sec mon" id="mon-probe">
+        <summary><span class="chev"></span><h2>Probe · UTM</h2><span class="sum" id="sum-mon-probe"></span></summary>
+        <div class="body">
+          <figure class="card" id="card-probe">
+            <figcaption class="card-head"><span class="card-title">Force against crosshead travel</span><span class="card-unit" id="unit-probe"></span></figcaption>
+            <div class="lgd" id="lg-probe"></div>
+            <canvas id="chart-probe" class="cv tall" tabindex="0" aria-label="probe chart: force against crosshead travel"></canvas>
+          </figure>
+        </div>
+      </details>
+      <details class="sec mon" id="mon-extremes">
+        <summary><span class="chev"></span><h2>Extremes</h2><span class="sum" id="sum-results"></span></summary>
+        <div class="body">
+          <div class="readout" id="ro-extremes">no results yet</div>
+          <div class="row buttons"><button id="btn-refresh-results" class="btn sm">Refresh</button></div>
+        </div>
+      </details>
+      <details class="sec mon" id="mon-disc">
+        <summary><span class="chev"></span><h2>Discretisation</h2><span class="sum" id="sum-mon-disc"></span></summary>
+        <div class="body">
+          <div class="row buttons">
+            <button id="btn-disc-run" class="btn primary sm" title="run / pause the joint placement (simulated annealing)">Run</button>
+            <button id="btn-disc-step" class="btn sm" title="advance the given number of temperature steps">Step</button>
+            <input type="number" id="nb-disc-step" class="num sm" min="1" step="10" value="20" title="temperature steps per Step" aria-label="temperature steps per Step">
+            <span class="spacer"></span>
+            <button id="btn-disc-reset" class="btn sm" title="remove the joints; the next Run starts from equal pieces">Clear joints</button>
+            <button type="button" class="info" aria-label="About this" data-tip="Cuts the laths into stock-length pieces on the current geometry by simulated annealing; after a solve the structural objective keeps the joints away from high moments. Parameters and weights: 8 Discretisation.">i</button>
+          </div>
+          <div class="cards">
+            <figure class="card">
+              <figcaption class="card-head"><span class="card-title">Objective per temperature step</span></figcaption>
+              <div class="lgd" id="disc-legend"></div>
+              <canvas id="disc-chart" class="cv" aria-label="annealing chart"></canvas>
+            </figure>
+            <figure class="card">
+              <figcaption class="card-head"><span class="card-title">Objective components</span><span class="card-unit">initial = 1</span></figcaption>
+              <canvas id="disc-comp" class="cv" aria-label="objective components"></canvas>
+            </figure>
+            <figure class="card">
+              <figcaption class="card-head"><span class="card-title">Piece lengths</span></figcaption>
+              <canvas id="disc-pieces" class="cv" aria-label="piece length histogram"></canvas>
+            </figure>
+          </div>
+          <div id="disc-text" class="readout"></div>
+        </div>
+      </details>
+    </div>
+    <div id="monitor-resize" class="resizer" role="separator" aria-orientation="vertical" aria-label="resize the monitor" tabindex="0" title="drag to resize the monitor"></div>
+  </aside>
 </div>
+
+<div id="infotip" role="tooltip" hidden></div>
+<div id="mon-tip" class="charttip" role="tooltip" hidden></div>
 
 <div id="modal" hidden>
   <div class="modal-card">

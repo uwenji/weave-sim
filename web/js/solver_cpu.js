@@ -1,14 +1,15 @@
 // Dynamic relaxation in f64 on the CPU — the reference implementation (and the fallback when there is no WebGPU).
-// A line-by-line port of weavesim/solver (core.py, goals/beam.py, goals/contact.py, goals/loads.py), plus the
-// augmented-Lagrangian gap described in the WeaveSim README (contact.augmented / contact.al_every).
+// The rod is the discrete Cosserat (Simo–Reissner) rod of rod_cosserat.js; the contact goals follow weavesim/goals
+// (contact.py, loads.py) plus the augmented-Lagrangian gap described in the WeaveSim README (contact.augmented / al_every).
 //
-// One iteration:  F, T = Σ goal forces (nodes) and torques (segment frames); T splits into twist (along the chord)
-// and a node couple (T × t)/l; anchors zero fixed DOFs; v += F/m, ω += T∥/I (Δt = 1, m = mass_scale·Σk); x += v;
-// frames rotate by ω about their chord, then re-align Z to the new chord; Barnes kinetic damping rolls back to the
-// kinetic-energy peak and restarts from rest. Convergence: max |F| over free nodes / reference force ≤ tol.
-import { buildState, cloneState, nodeQuats, Anchors, Loads, strandStiffness } from './model.js';
-import { toFrame, fromFrameFast, qexp, qmul, qnormalize, rotBetween } from './quat.js';
+// One iteration:  F, T = Σ goal forces (nodes) and world torques (segment frames); anchors zero fixed DOFs (rotation
+// anchors act through the clamp joints of CosseratRod.setClamps); v += F/m, ω += Rᵀ T / I (Δt = 1, body axes, masses and
+// inertias = mass_scale·Σk); x += v, q ← q ⊗ exp(ω); Barnes kinetic damping rolls back to the kinetic-energy peak and
+// restarts from rest. Convergence: max(|F| over free nodes / F_ref, |T| over the frames / (F_ref·l_min)) ≤ tol.
+import { buildState, nodeQuats, Anchors, Loads, strandStiffness } from './model.js';
+import { toFrame, qexp, qmul, qnormalize } from './quat.js';
 import { fkey } from './topology.js';
+import { CosseratRod } from './rod_cosserat.js';
 
 export const SUPPORT_SMOOTH = 0.03;                    // tanh width (≈1.7°) of the support-point sign
 // Roll rate limit of the segment frames: at most half the support-smoothing angle per iteration. The corner lever is a
@@ -38,194 +39,6 @@ export function pairwiseSum(a, lo = 0, n = a.length) {
 }
 
 const tanhSafe = Math.tanh;
-
-// ================================================================================================= ActiveBeam
-export class ActiveBeam {
-  /** stiff: per-segment {EA, EIx, EIy, GJ}; activation: Float64Array(3p) (flat, edge, twist); rest: Omega0 to keep */
-  constructor(st, stiff, prestress = 'flat', activation = null, rest = null) {
-    const m = st.m, p = st.p;
-    this.segEA = Float64Array.from(stiff.EA); this.segEIx = Float64Array.from(stiff.EIx); this.segEIy = Float64Array.from(stiff.EIy); this.segGJ = Float64Array.from(stiff.GJ);
-    this.EA = this.segEA;
-    this.EIx = new Float64Array(p); this.EIy = new Float64Array(p); this.GJ = new Float64Array(p);
-    for (let j = 0; j < p; j++) { const s0 = st.jSeg0[j]; this.EIx[j] = this.segEIx[s0]; this.EIy[j] = this.segEIy[s0]; this.GJ[j] = this.segGJ[s0]; }
-    ActiveBeam.alignFrames(st);
-    const act = new Float64Array(3 * p);
-    if (prestress !== 'asbuilt' && activation) for (let i = 0; i < 3 * p; i++) act[i] = Math.min(Math.max(activation[i], 0), 1);
-    this.activation = act;
-    if (rest) st.Omega0 = Float64Array.from(rest);
-    else if (p && act.some(v => v < 1.0)) {
-      const om = ActiveBeam.asBuilt(st);
-      st.Omega0 = new Float64Array(3 * p);
-      for (let i = 0; i < 3 * p; i++) st.Omega0[i] = (1.0 - act[i]) * om[i];
-    } else st.Omega0 = new Float64Array(3 * p);
-    this.N = new Float64Array(m); this.M = new Float64Array(3 * p);
-    this.energy = 0; this.energyParts = { bending: 0, torsion: 0, stretch: 0 };
-    this.cNode = []; this.cNb = []; this.cSeg = []; this.cDir = []; this.cLen = []; this.cM = new Float64Array(0); this.cEIx = []; this.cEIy = [];
-    this._ra = new Float64Array(9); this._rb = new Float64Array(9); this._rr = new Float64Array(9);
-  }
-
-  setClamps(st, clamps) {
-    this.cNode = clamps.map(c => c[0]); this.cNb = clamps.map(c => c[1]); this.cSeg = clamps.map(c => c[2]); this.cDir = clamps.map(c => c[3]);
-    this.cLen = this.cSeg.map(j => 0.5 * st.l0[j]);
-    this.cEIx = this.cSeg.map(j => this.segEIx[j]); this.cEIy = this.cSeg.map(j => this.segEIy[j]);
-    this.cM = new Float64Array(2 * clamps.length);
-  }
-
-  /** rotate every segment frame minimally so that its Z axis is the current chord */
-  static alignFrames(st) {
-    const R = new Float64Array(9), Rr = new Float64Array(9), Rn = new Float64Array(9), q = new Float64Array(4), X = st.X;
-    for (let j = 0; j < st.m; j++) {
-      const a = st.segI0[j], b = st.segI1[j];
-      let ex = X[3 * b] - X[3 * a], ey = X[3 * b + 1] - X[3 * a + 1], ez = X[3 * b + 2] - X[3 * a + 2];
-      const l = Math.max(Math.sqrt(ex * ex + ey * ey + ez * ez), 1e-12); ex /= l; ey /= l; ez /= l;
-      toFrame(st.Q, 4 * j, R);
-      rotBetween(R[6], R[7], R[8], ex, ey, ez, Rr);
-      // Rn = Rr · R  (columns of R rotated)
-      for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) Rn[3 * c + r] = Rr[3 * r] * R[3 * c] + Rr[3 * r + 1] * R[3 * c + 1] + Rr[3 * r + 2] * R[3 * c + 2];
-      fromFrameFast(Rn, q);
-      st.Q[4 * j] = q[0]; st.Q[4 * j + 1] = q[1]; st.Q[4 * j + 2] = q[2]; st.Q[4 * j + 3] = q[3];
-    }
-  }
-
-  /** rest curvature/twist of the current geometry, per joint: (κb·m1, κb·m2, φ)/l̄ */
-  static asBuilt(st) {
-    const out = new Float64Array(3 * st.p), Ra = new Float64Array(9), Rb = new Float64Array(9), P = new Float64Array(9);
-    for (let j = 0; j < st.p; j++) {
-      const c = ActiveBeam.curv(st, j, Ra, Rb);
-      const lb = st.jLen[j];
-      out[3 * j] = (c.kb[0] * c.m1[0] + c.kb[1] * c.m1[1] + c.kb[2] * c.m1[2]) / lb;
-      out[3 * j + 1] = (c.kb[0] * c.m2[0] + c.kb[1] * c.m2[1] + c.kb[2] * c.m2[2]) / lb;
-      out[3 * j + 2] = ActiveBeam.twist(Ra, Rb, P) / lb;
-    }
-    return out;
-  }
-
-  static curv(st, j, Ra, Rb) {
-    const X = st.X, s0 = st.jSeg0[j], s1 = st.jSeg1[j];
-    const a = [X[3 * st.segI1[s0]] - X[3 * st.segI0[s0]], X[3 * st.segI1[s0] + 1] - X[3 * st.segI0[s0] + 1], X[3 * st.segI1[s0] + 2] - X[3 * st.segI0[s0] + 2]];
-    const b = [X[3 * st.segI1[s1]] - X[3 * st.segI0[s1]], X[3 * st.segI1[s1] + 1] - X[3 * st.segI0[s1] + 1], X[3 * st.segI1[s1] + 2] - X[3 * st.segI0[s1] + 2]];
-    const la = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = Math.sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
-    const den = Math.max(la * lb + (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]), 1e-12);
-    const kb = [2 * (a[1] * b[2] - a[2] * b[1]) / den, 2 * (a[2] * b[0] - a[0] * b[2]) / den, 2 * (a[0] * b[1] - a[1] * b[0]) / den];
-    toFrame(st.Q, 4 * s0, Ra); toFrame(st.Q, 4 * s1, Rb);
-    const unit = (x, y, z) => { const l = Math.max(Math.sqrt(x * x + y * y + z * z), 1e-12); return [x / l, y / l, z / l]; };
-    const m1 = unit(Ra[0] + Rb[0], Ra[1] + Rb[1], Ra[2] + Rb[2]);
-    const m2 = unit(Ra[3] + Rb[3], Ra[4] + Rb[4], Ra[5] + Rb[5]);
-    return { a, b, la, lb, den, kb, m1, m2 };
-  }
-
-  /** twist angle at a joint: X of segment a parallel-transported onto chord b vs X of segment b */
-  static twist(Ra, Rb, P) {
-    rotBetween(Ra[6], Ra[7], Ra[8], Rb[6], Rb[7], Rb[8], P);
-    const xa = [P[0] * Ra[0] + P[1] * Ra[1] + P[2] * Ra[2], P[3] * Ra[0] + P[4] * Ra[1] + P[5] * Ra[2], P[6] * Ra[0] + P[7] * Ra[1] + P[8] * Ra[2]];
-    const xb = [Rb[0], Rb[1], Rb[2]], tb = [Rb[6], Rb[7], Rb[8]];
-    const cx = xa[1] * xb[2] - xa[2] * xb[1], cy = xa[2] * xb[0] - xa[0] * xb[2], cz = xa[0] * xb[1] - xa[1] * xb[0];
-    const s = cx * tb[0] + cy * tb[1] + cz * tb[2];
-    const c = xa[0] * xb[0] + xa[1] * xb[1] + xa[2] * xb[2];
-    return Math.atan2(s, c);
-  }
-
-  addStiffness(st, kNode, kSeg) {
-    for (let j = 0; j < st.m; j++) kNode[st.segI0[j]] += this.EA[j] / st.l0[j];
-    for (let j = 0; j < st.m; j++) kNode[st.segI1[j]] += this.EA[j] / st.l0[j];
-    if (st.p) {
-      const kb = new Float64Array(st.p);
-      for (let j = 0; j < st.p; j++) kb[j] = 4.0 * Math.max(this.EIx[j], this.EIy[j]) / Math.max(st.jLen[j], 1e-12) ** 3;
-      for (let j = 0; j < st.p; j++) kNode[st.segI0[st.jSeg0[j]]] += kb[j];
-      for (let j = 0; j < st.p; j++) kNode[st.jNode[j]] += kb[j];
-      for (let j = 0; j < st.p; j++) kNode[st.segI1[st.jSeg1[j]]] += kb[j];
-      for (let j = 0; j < st.p; j++) kSeg[st.jSeg0[j]] += this.GJ[j] / Math.max(st.jLen[j], 1e-12);
-      for (let j = 0; j < st.p; j++) kSeg[st.jSeg1[j]] += this.GJ[j] / Math.max(st.jLen[j], 1e-12);
-    }
-    for (let c = 0; c < this.cNode.length; c++) { const kc = 4.0 * Math.max(this.cEIx[c], this.cEIy[c]) / Math.max(this.cLen[c], 1e-12) ** 3; kNode[this.cNb[c]] += kc; }
-    for (let c = 0; c < this.cNode.length; c++) { const kc = 4.0 * Math.max(this.cEIx[c], this.cEIy[c]) / Math.max(this.cLen[c], 1e-12) ** 3; kNode[this.cNode[c]] += kc; }
-  }
-
-  apply(st, F, T) {
-    const X = st.X, m = st.m, p = st.p;
-    // stretch
-    const fs = new Float64Array(3 * m);
-    let eStretch = 0;
-    const eS = new Float64Array(m);
-    for (let j = 0; j < m; j++) {
-      const a = st.segI0[j], b = st.segI1[j];
-      const ex = X[3 * b] - X[3 * a], ey = X[3 * b + 1] - X[3 * a + 1], ez = X[3 * b + 2] - X[3 * a + 2];
-      const L = Math.sqrt(ex * ex + ey * ey + ez * ez), Lc = Math.max(L, 1e-12);
-      const N = this.EA[j] * (L - st.l0[j]) / st.l0[j];
-      this.N[j] = N;
-      fs[3 * j] = N * ex / Lc; fs[3 * j + 1] = N * ey / Lc; fs[3 * j + 2] = N * ez / Lc;
-      eS[j] = N * (L - st.l0[j]);
-    }
-    for (let j = 0; j < m; j++) { const a = st.segI0[j]; F[3 * a] += fs[3 * j]; F[3 * a + 1] += fs[3 * j + 1]; F[3 * a + 2] += fs[3 * j + 2]; }
-    for (let j = 0; j < m; j++) { const b = st.segI1[j]; F[3 * b] -= fs[3 * j]; F[3 * b + 1] -= fs[3 * j + 1]; F[3 * b + 2] -= fs[3 * j + 2]; }
-    eStretch = 0.5 * pairwiseSum(eS);
-    let eBend = 0, eTwist = 0;
-    if (p) {
-      const Fim = new Float64Array(3 * p), Fi = new Float64Array(3 * p), Fip = new Float64Array(3 * p), Ta = new Float64Array(3 * p), Tb = new Float64Array(3 * p);
-      const eB = new Float64Array(p), eT = new Float64Array(p);
-      const Ra = this._ra, Rb = this._rb, P = this._rr;
-      for (let j = 0; j < p; j++) {
-        const c = ActiveBeam.curv(st, j, Ra, Rb);
-        const { a, b, la, lb, den, kb, m1, m2 } = c;
-        const lbar = st.jLen[j];
-        const k1 = (kb[0] * m1[0] + kb[1] * m1[1] + kb[2] * m1[2]) / lbar;
-        const k2 = (kb[0] * m2[0] + kb[1] * m2[1] + kb[2] * m2[2]) / lbar;
-        const M1 = this.EIx[j] * (k1 - st.Omega0[3 * j]), M2 = this.EIy[j] * (k2 - st.Omega0[3 * j + 1]);
-        const g = [M1 * m1[0] + M2 * m2[0], M1 * m1[1] + M2 * m2[1], M1 * m1[2] + M2 * m2[2]];
-        const kg = kb[0] * g[0] + kb[1] * g[1] + kb[2] * g[2];
-        const ah = [a[0] / la, a[1] / la, a[2] / la], bh = [b[0] / lb, b[1] / lb, b[2] / lb];
-        const bxg = [b[1] * g[2] - b[2] * g[1], b[2] * g[0] - b[0] * g[2], b[0] * g[1] - b[1] * g[0]];
-        const axg = [a[1] * g[2] - a[2] * g[1], a[2] * g[0] - a[0] * g[2], a[0] * g[1] - a[1] * g[0]];
-        for (let k = 0; k < 3; k++) {
-          const fim = (2 * bxg[k] - (lb * ah[k] + b[k]) * kg) / den;
-          const fip = (2 * axg[k] + (la * bh[k] + a[k]) * kg) / den;
-          Fim[3 * j + k] = fim; Fip[3 * j + k] = fip; Fi[3 * j + k] = -(fim + fip);
-        }
-        eB[j] = lbar * (M1 * (k1 - st.Omega0[3 * j]) + M2 * (k2 - st.Omega0[3 * j + 1]));
-        // twist
-        const phi = ActiveBeam.twist(Ra, Rb, P), tau = phi / lbar;
-        const Mt = this.GJ[j] * (tau - st.Omega0[3 * j + 2]);
-        for (let k = 0; k < 3; k++) { Ta[3 * j + k] = Mt * Ra[6 + k]; Tb[3 * j + k] = -Mt * Rb[6 + k]; }
-        eT[j] = lbar * Mt * (tau - st.Omega0[3 * j + 2]);
-        this.M[3 * j] = M1; this.M[3 * j + 1] = M2; this.M[3 * j + 2] = Mt;
-      }
-      for (let j = 0; j < p; j++) { const i = st.segI0[st.jSeg0[j]]; for (let k = 0; k < 3; k++) F[3 * i + k] += Fim[3 * j + k]; }
-      for (let j = 0; j < p; j++) { const i = st.jNode[j]; for (let k = 0; k < 3; k++) F[3 * i + k] += Fi[3 * j + k]; }
-      for (let j = 0; j < p; j++) { const i = st.segI1[st.jSeg1[j]]; for (let k = 0; k < 3; k++) F[3 * i + k] += Fip[3 * j + k]; }
-      eBend += 0.5 * pairwiseSum(eB);
-      for (let j = 0; j < p; j++) { const s = st.jSeg0[j]; for (let k = 0; k < 3; k++) T[3 * s + k] += Ta[3 * j + k]; }
-      for (let j = 0; j < p; j++) { const s = st.jSeg1[j]; for (let k = 0; k < 3; k++) T[3 * s + k] += Tb[3 * j + k]; }
-      eTwist += 0.5 * pairwiseSum(eT);
-    }
-    const nc = this.cNode.length;
-    if (nc) {
-      const R = this._ra, Fnb = new Float64Array(3 * nc), eC = new Float64Array(nc);
-      for (let c = 0; c < nc; c++) {
-        const a = this.cDir[c], nb = this.cNb[c], nd = this.cNode[c];
-        const b = [X[3 * nb] - X[3 * nd], X[3 * nb + 1] - X[3 * nd + 1], X[3 * nb + 2] - X[3 * nd + 2]];
-        const lb = Math.sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
-        const den = Math.max(lb + (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]), 1e-12);
-        const kb = [2 * (a[1] * b[2] - a[2] * b[1]) / den, 2 * (a[2] * b[0] - a[0] * b[2]) / den, 2 * (a[0] * b[1] - a[1] * b[0]) / den];
-        toFrame(st.Q, 4 * this.cSeg[c], R);
-        const m1 = [R[0], R[1], R[2]], m2 = [R[3], R[4], R[5]], lc = this.cLen[c];
-        const k1 = (kb[0] * m1[0] + kb[1] * m1[1] + kb[2] * m1[2]) / lc, k2 = (kb[0] * m2[0] + kb[1] * m2[1] + kb[2] * m2[2]) / lc;
-        const M1 = this.cEIx[c] * k1, M2 = this.cEIy[c] * k2;
-        const g = [M1 * m1[0] + M2 * m2[0], M1 * m1[1] + M2 * m2[1], M1 * m1[2] + M2 * m2[2]];
-        const kg = kb[0] * g[0] + kb[1] * g[1] + kb[2] * g[2];
-        const lbc = Math.max(lb, 1e-12), bh = [b[0] / lbc, b[1] / lbc, b[2] / lbc];
-        const axg = [a[1] * g[2] - a[2] * g[1], a[2] * g[0] - a[0] * g[2], a[0] * g[1] - a[1] * g[0]];
-        for (let k = 0; k < 3; k++) Fnb[3 * c + k] = (2 * axg[k] + (bh[k] + a[k]) * kg) / den;
-        eC[c] = lc * (M1 * k1 + M2 * k2);
-        this.cM[2 * c] = M1; this.cM[2 * c + 1] = M2;
-      }
-      for (let c = 0; c < nc; c++) { const i = this.cNb[c]; for (let k = 0; k < 3; k++) F[3 * i + k] += Fnb[3 * c + k]; }
-      for (let c = 0; c < nc; c++) { const i = this.cNode[c]; for (let k = 0; k < 3; k++) F[3 * i + k] -= Fnb[3 * c + k]; }
-      eBend += 0.5 * pairwiseSum(eC);
-    }
-    this.energyParts = { bending: eBend, torsion: eTwist, stretch: eStretch };
-    this.energy = eStretch + eBend + eTwist;
-  }
-}
 
 // ================================================================================================= PolylineContact
 export class PolylineContact {
@@ -712,10 +525,12 @@ export class CpuSolver {
     const sc = this.scene, st = this.st;
     const { stiff, act } = strandStiffness(sc, st);
     this.stiff = stiff;
-    this.beam = new ActiveBeam(st, stiff, sc.solver.prestress, act, rest);
+    this.rod = 'cosserat';
+    if (!st.Wr || st.Wr.length !== 3 * st.m) st.Wr = new Float64Array(3 * st.m);
+    this.beam = new CosseratRod(st, stiff, sc.solver.prestress, act, rest);
     this.loads = new Loads(sc, this.topo, st);
     this.anchors = new Anchors(sc, this.topo, st);
-    this.beam.setClamps(st, this.anchors.clamps);
+    this.beam.setClamps(st, this.anchors.rotClamps);
     if (contact) this.contact = contact;
     else {
       const secOf = (s) => sc.group(sc.strandGroup(s)).section, matOf = (s) => sc.group(sc.strandGroup(s)).material;
@@ -727,13 +542,16 @@ export class CpuSolver {
     const kNode = new Float64Array(n), kSeg = new Float64Array(m);
     this.beam.addStiffness(st, kNode, kSeg);
     if (this.contact) this.contact.addStiffness(st, kNode, kSeg);
-    for (let j = 0; j < m; j++) kNode[st.segI0[j]] += kSeg[j] / Math.max(st.l0[j], 1e-12) ** 2;
-    for (let j = 0; j < m; j++) kNode[st.segI1[j]] += kSeg[j] / Math.max(st.l0[j], 1e-12) ** 2;
     const ms = +sc.solver.mass_scale;
     this.mass = new Float64Array(n); for (let i = 0; i < n; i++) this.mass[i] = ms * Math.max(kNode[i], 1e-12);
-    this.kSegStatic = new Float64Array(m);
-    this.beam.addStiffness(st, new Float64Array(n), this.kSegStatic);
-    this.inertia = new Float64Array(m); for (let j = 0; j < m; j++) this.inertia[j] = ms * Math.max(kSeg[j], 1e-12);
+    // rotational inertia per segment and body axis (X, Y, Z): joints, clamps, shear lever + the contact righting share
+    this.kRotStatic = new Float64Array(3 * m);
+    this.beam.addRotStiffness(st, this.kRotStatic);
+    this.inertia3 = new Float64Array(3 * m);
+    for (let j = 0; j < m; j++) for (let k = 0; k < 3; k++) this.inertia3[3 * j + k] = ms * Math.max(this.kRotStatic[3 * j + k] + kSeg[j], 1e-12);
+    let lmin = Infinity; for (const v of st.jLen) lmin = Math.min(lmin, v);
+    for (const v of st.l0) lmin = Math.min(lmin, v);
+    this.lRef = Number.isFinite(lmin) ? lmin : 1.0;
     this.F = new Float64Array(3 * n); this.T = new Float64Array(3 * m);
   }
 
@@ -743,7 +561,7 @@ export class CpuSolver {
   clone() { return deepClone(this, new Map([[this.topo, this.topo]])); }
 
   /** re-read loads, anchors, stiffness and beam factors; keep positions, frames, contact state and the rest state
-   *  (recomputed from the reference geometry X0 only when the activation changed) */
+   *  (recomputed from the reference frames Q0 only when the activation changed) */
   rebuildGoals() {
     const st = this.st, sc = this.scene;
     let { act } = strandStiffness(sc, st);
@@ -752,86 +570,67 @@ export class CpuSolver {
     let rest;
     if (act.length === this.beam.activation.length && act.every((v, i) => Math.abs(v - this.beam.activation[i]) <= 1e-8 + 1e-5 * Math.abs(this.beam.activation[i]))) rest = st.Omega0.slice();
     else {
-      const X = st.X.slice(), Q = st.Q.slice();
-      st.X.set(st.X0);
-      new ActiveBeam(st, { EA: new Float64Array(st.m).fill(1), EIx: new Float64Array(st.m).fill(1), EIy: new Float64Array(st.m).fill(1), GJ: new Float64Array(st.m).fill(1) }, sc.solver.prestress, act);
-      rest = st.Omega0.slice();
-      st.X.set(X); st.Q.set(Q);
+      const om = CosseratRod.asBuilt(st, st.Q0 || st.Q);
+      rest = om.map((v, i) => (1.0 - act[i]) * v);
     }
     this._buildGoals(this.contact, rest);
     this.converged = false; this.kePrev = 0.0;
   }
 
+  /** nIter iterations of the Cosserat dynamic relaxation (stops early at convergence): node velocities from the
+   *  forces, a 3-axis body angular velocity per segment from the torques (no chord alignment, no torque split);
+   *  residual = max(free-DOF force / F_ref, frame torque / (F_ref·l_min)) */
   step(nIter = 1) {
     const st = this.st, sp = this.scene.solver, n = st.n, m = st.m;
     const rampN = Math.max(this.scene.contact.ramp_iter | 0, 0);
-    const F = this.F, T = this.T, Tpar = new Float64Array(m), tt = new Float64Array(3 * m);
+    const F = this.F, T = this.T, R = new Float64Array(9), tm = new Float64Array(3 * m), kTw = new Float64Array(m);
     const Xprev = new Float64Array(3 * n), Qprev = new Float64Array(4 * m), dq = new Float64Array(4), qq = new Float64Array(4), q0 = new Float64Array(4);
-    const kin = new Float64Array(3 * n), kinR = new Float64Array(m);
+    const kin = new Float64Array(3 * n), kinR = new Float64Array(3 * m);
+    const W = st.Wr, I3 = this.inertia3, An = this.anchors;
     let broke = false;
     for (let it = 0; it < nIter; it++) {
       if (this.contact) this.contact.ramp = rampN === 0 ? 1.0 : Math.min(1.0, 0.01 + 0.99 * st.iteration / rampN);
       F.fill(0); T.fill(0);
       this.beam.apply(st, F, T);
-      // loads (const + frame-local point loads)
       const L = this.loads;
       L.total.set(L.const);
       if (L.pointLocal.length) {
-        const nq = nodeQuats(st), R = new Float64Array(9);
-        for (const [nid, Fv] of L.pointLocal) { toFrame(nq, 4 * nid, R); for (let k = 0; k < 3; k++) L.total[3 * nid + k] += R[k] * Fv[0] + R[3 + k] * Fv[1] + R[6 + k] * Fv[2]; }
+        const nq = nodeQuats(st), Rl = new Float64Array(9);
+        for (const [nid, Fv] of L.pointLocal) { toFrame(nq, 4 * nid, Rl); for (let k = 0; k < 3; k++) L.total[3 * nid + k] += Rl[k] * Fv[0] + Rl[3 + k] * Fv[1] + Rl[6 + k] * Fv[2]; }
       }
       for (let i = 0; i < 3 * n; i++) F[i] += L.total[i];
       if (this.contact) this.contact.apply(st, F, T);
-      // split segment torques: parallel → twist, perpendicular → node couples
-      const X = st.X;
-      const cpl = new Float64Array(3 * m);
-      for (let j = 0; j < m; j++) {
-        const a = st.segI0[j], b = st.segI1[j];
-        const ex = X[3 * b] - X[3 * a], ey = X[3 * b + 1] - X[3 * a + 1], ez = X[3 * b + 2] - X[3 * a + 2];
-        const Lj = Math.max(Math.sqrt(ex * ex + ey * ey + ez * ez), 1e-12);
-        const tx = ex / Lj, ty = ey / Lj, tz = ez / Lj;
-        tt[3 * j] = tx; tt[3 * j + 1] = ty; tt[3 * j + 2] = tz;
-        const Tx = T[3 * j], Ty = T[3 * j + 1], Tz = T[3 * j + 2];
-        Tpar[j] = Tx * tx + Ty * ty + Tz * tz;
-        cpl[3 * j] = (Ty * tz - Tz * ty) / Lj; cpl[3 * j + 1] = (Tz * tx - Tx * tz) / Lj; cpl[3 * j + 2] = (Tx * ty - Ty * tx) / Lj;
-      }
-      for (let j = 0; j < m; j++) { const b = st.segI1[j]; F[3 * b] += cpl[3 * j]; F[3 * b + 1] += cpl[3 * j + 1]; F[3 * b + 2] += cpl[3 * j + 2]; }
-      for (let j = 0; j < m; j++) { const a = st.segI0[j]; F[3 * a] -= cpl[3 * j]; F[3 * a + 1] -= cpl[3 * j + 1]; F[3 * a + 2] -= cpl[3 * j + 2]; }
-      // anchors: reactions, then zero the fixed DOFs
-      const An = this.anchors;
       An.reactions.fill(0);
       for (let i = 0; i < n; i++) if (An.fixedAny[i]) for (let k = 0; k < 3; k++) An.reactions[3 * i + k] = -F[3 * i + k];
       for (let i = 0; i < 3 * n; i++) if (!An.nodeFree[i]) F[i] = 0;
-      for (let j = 0; j < m; j++) if (!An.twistFree[j]) Tpar[j] = 0;
-      if (this.contact) {                               // twist inertia follows the current contact forces
-        const kSeg = this.kSegStatic.slice();
-        this.contact.addTwistStiffness(st, kSeg);
-        for (let j = 0; j < m; j++) this.inertia[j] = sp.mass_scale * Math.max(kSeg[j], 1e-12);
+      // torques in the body axes (rotation anchors act through the clamp joints of CosseratRod.setClamps)
+      for (let j = 0; j < m; j++) {
+        toFrame(st.Q, 4 * j, R);
+        for (let k = 0; k < 3; k++) tm[3 * j + k] = R[3 * k] * T[3 * j] + R[3 * k + 1] * T[3 * j + 1] + R[3 * k + 2] * T[3 * j + 2];
       }
-      // integrate
+      if (this.contact) {                               // contact righting stiffness follows the contact forces
+        kTw.fill(0); this.contact.addTwistStiffness(st, kTw);
+        for (let j = 0; j < m; j++) for (let k = 0; k < 3; k++) I3[3 * j + k] = sp.mass_scale * Math.max(this.kRotStatic[3 * j + k] + kTw[j], 1e-12);
+      }
       Xprev.set(st.X); Qprev.set(st.Q);
       if (st.iteration < sp.warmup_iter && this.contact) { F.fill(0); st.V.fill(0); }
       for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) st.V[3 * i + k] += F[3 * i + k] / this.mass[i];
-      for (let j = 0; j < m; j++) st.Wt[j] = Math.min(Math.max(st.Wt[j] + Tpar[j] / this.inertia[j], -TWIST_RATE_MAX), TWIST_RATE_MAX);
-      if (sp.damping !== 1.0) { for (let i = 0; i < 3 * n; i++) st.V[i] *= sp.damping; for (let j = 0; j < m; j++) st.Wt[j] *= sp.damping; }
+      for (let j = 0; j < 3 * m; j++) W[j] += tm[j] / I3[j];
+      for (let j = 0; j < m; j++) W[3 * j + 2] = Math.min(Math.max(W[3 * j + 2], -TWIST_RATE_MAX), TWIST_RATE_MAX);
+      if (sp.damping !== 1.0) { for (let i = 0; i < 3 * n; i++) st.V[i] *= sp.damping; for (let j = 0; j < 3 * m; j++) W[j] *= sp.damping; }
       for (let i = 0; i < 3 * n; i++) if (!An.nodeFree[i]) st.V[i] = 0;
-      for (let j = 0; j < m; j++) if (!An.twistFree[j]) st.Wt[j] = 0;
       for (let i = 0; i < 3 * n; i++) st.X[i] += st.V[i];
-      if (m) {
-        for (let j = 0; j < m; j++) {
-          const w = st.Wt[j];
-          qexp(w * tt[3 * j], w * tt[3 * j + 1], w * tt[3 * j + 2], dq);
-          q0[0] = st.Q[4 * j]; q0[1] = st.Q[4 * j + 1]; q0[2] = st.Q[4 * j + 2]; q0[3] = st.Q[4 * j + 3];
-          qmul(dq, q0, qq); qnormalize(qq);
-          st.Q[4 * j] = qq[0]; st.Q[4 * j + 1] = qq[1]; st.Q[4 * j + 2] = qq[2]; st.Q[4 * j + 3] = qq[3];
-        }
-        ActiveBeam.alignFrames(st);
+      for (let j = 0; j < m; j++) {                     // body-frame rotation: q ← q ⊗ exp(ω)
+        qexp(W[3 * j], W[3 * j + 1], W[3 * j + 2], dq);
+        q0[0] = st.Q[4 * j]; q0[1] = st.Q[4 * j + 1]; q0[2] = st.Q[4 * j + 2]; q0[3] = st.Q[4 * j + 3];
+        qmul(q0, dq, qq); qnormalize(qq);
+        st.Q[4 * j] = qq[0]; st.Q[4 * j + 1] = qq[1]; st.Q[4 * j + 2] = qq[2]; st.Q[4 * j + 3] = qq[3];
       }
       for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) kin[3 * i + k] = this.mass[i] * st.V[3 * i + k] ** 2;
-      for (let j = 0; j < m; j++) kinR[j] = this.inertia[j] * st.Wt[j] ** 2;
+      for (let j = 0; j < 3 * m; j++) kinR[j] = I3[j] * W[j] ** 2;
       let ke = 0.5 * (pairwiseSum(kin) + pairwiseSum(kinR));
       if (sp.kinetic_damping && ke < this.kePrev) {
-        st.X.set(Xprev); st.Q.set(Qprev); st.V.fill(0); st.Wt.fill(0); ke = 0.0;
+        st.X.set(Xprev); st.Q.set(Qprev); st.V.fill(0); W.fill(0); ke = 0.0;
       }
       this.kePrev = ke;
       st.iteration += 1;
@@ -842,17 +641,19 @@ export class CpuSolver {
       H.kinetic.push(ke);
       H.strain.push(this.beam.energy + (c ? c.energy : 0));
       H.bending.push(this.beam.energyParts.bending); H.torsion.push(this.beam.energyParts.torsion); H.stretch.push(this.beam.energyParts.stretch);
+      (H.shear || (H.shear = [])).push(this.beam.energyParts.shear);
       H.contact.push(c ? c.energy : 0);
-      // relative unbalanced force over the free nodes
-      let fmax = 0;
-      for (let i = 0; i < n; i++) if (An.allFree[i]) { const f = Math.sqrt(F[3 * i] ** 2 + F[3 * i + 1] ** 2 + F[3 * i + 2] ** 2); if (f > fmax) fmax = f; }
+      let fmax = 0, tmax = 0;
+      for (let i = 0; i < n; i++) { const f = Math.sqrt(F[3 * i] ** 2 + F[3 * i + 1] ** 2 + F[3 * i + 2] ** 2); if (f > fmax) fmax = f; }
+      for (let j = 0; j < m; j++) { const t = Math.sqrt(tm[3 * j] ** 2 + tm[3 * j + 1] ** 2 + tm[3 * j + 2] ** 2); if (t > tmax) tmax = t; }
       const fref = this.forceRef();
-      const resid = n ? fmax / fref : 0;
+      this.residualParts = { force: n ? fmax / fref : 0, torque: m ? tmax / (fref * this.lRef) : 0 };
+      const resid = Math.max(this.residualParts.force, this.residualParts.torque);
       st.residual = st.iteration > sp.warmup_iter ? resid : Infinity;
       H.residual.push(st.residual);
       if (st.residual <= sp.tol) { this.converged = true; broke = true; break; }
     }
-    if (!broke) this.converged = st.residual <= sp.tol;          // Python: for … else
+    if (!broke) this.converged = st.residual <= sp.tol;          // for … else
     return st;
   }
 
@@ -880,7 +681,7 @@ export class CpuSolver {
   }
 
   /** current geometry becomes the displacement origin; slip counters restart (fastened-structure protocol, step 2) */
-  internalize() { this.st.X0 = this.st.X.slice(); this.st.slip.fill(0); }
+  internalize() { this.st.X0 = this.st.X.slice(); this.st.Q0 = this.st.Q.slice(); this.st.slip.fill(0); }
   lockContacts(edges = null) { if (!this.contact) return; this.contact.lock(edges ? this._mask(edges) : null); this.scene.contact.locked = this.contact.locked.every(Boolean); }
   unlockContacts(edges = null) { if (!this.contact) return; this.contact.unlock(edges ? this._mask(edges) : null); this.scene.contact.locked = this.contact.locked.every(Boolean); }
   _mask(edges) { const s = new Set(edges); return Array.from(this.st.knotEdges, e => s.has(e)); }
@@ -909,6 +710,7 @@ export function buildResults(sv) {
     }
   }
   const seg = { Mx: new Float64Array(m), My: new Float64Array(m), T: new Float64Array(m), N: Float64Array.from(sv.beam.N) };
+  if (sv.beam.V) { seg.Vx = Float64Array.from({ length: m }, (_, j) => sv.beam.V[2 * j]); seg.Vy = Float64Array.from({ length: m }, (_, j) => sv.beam.V[2 * j + 1]); }
   for (let j = 0; j < m; j++) { seg.Mx[j] = segM[3 * j]; seg.My[j] = segM[3 * j + 1]; seg.T[j] = segM[3 * j + 2]; }
   const disp = new Float64Array(3 * n); for (let i = 0; i < 3 * n; i++) disp[i] = st.X[i] - st.X0[i];
   const knot = {};
@@ -927,7 +729,8 @@ export function buildResults(sv) {
   return {
     iterations: st.iteration, converged: sv.converged, residual: st.residual,
     segment: seg, knot, disp, reactions,
-    energies: { strain: last(H.strain), kinetic: last(H.kinetic), beam: sv.beam.energy, bending: sv.beam.energyParts.bending, torsion: sv.beam.energyParts.torsion, stretch: sv.beam.energyParts.stretch, contact: c ? c.energy : 0 },
+    energies: { strain: last(H.strain), kinetic: last(H.kinetic), beam: sv.beam.energy, bending: sv.beam.energyParts.bending, torsion: sv.beam.energyParts.torsion, stretch: sv.beam.energyParts.stretch, shear: sv.beam.energyParts.shear || 0, contact: c ? c.energy : 0 },
+    rod: 'cosserat',
   };
 }
 

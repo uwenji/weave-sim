@@ -1,8 +1,9 @@
 # WeaveSim Web
 
-WeaveSim in the browser: the same scenes, topology and solver as the Python program, with a batched WebGPU solver for
-large weaves and calibration populations, the CPU solver in double precision as the reference, and a calibration sandbox
-that fits model parameters to UTM load tests and exports them as a parameter set for other weave topologies.
+WeaveSim in the browser: the same scenes and topology as the Python program, a discrete Cosserat rod for the laths
+(shear and the roll moment of anisotropic bending included), a batched WebGPU solver for large weaves and calibration
+populations, the CPU solver in double precision as the reference, and a calibration sandbox that fits model parameters
+to UTM load tests and exports them as a parameter set for other weave topologies.
 
 Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <http://localhost:8090/web/>.
 
@@ -10,12 +11,16 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 
 | file | what it does |
 |---|---|
-| `index.html`, `style.css` | the app: status bar, solve / discretisation strip (pinned), sections 1 File … 10 Calibration, 3-D view with the navigation cube, the colour legend and the value labels, the Display sidebar (folds to a tab, docks left or right) — the idiom of the WeaveSim viewer, LocalSH and the Joint FEA apps |
-| `theory.html` | how the solver works, for reviewers and for readers without the maths (opened from *11 Theory* at the end of the menu): the Cosserat and Kirchhoff rod, second-order theory, the sliding contact point and reverse kinematics, the section-aware gap, friction, embedment, dynamic relaxation and its safeguards (the 17 Oct 2026 multiplier fix, pass-through) — every equation with its code location, interactive figures, light and dark, a plain-words reading mode; one self-contained page, KaTeX from `vendor/katex` |
+| `index.html`, `style.css` | the app: status bar; the Setup sidebar (sections 1 File … 10 Calibration, an accordion); the 3-D view with the navigation cube, the colour legend and the value labels; the Monitor sidebar (run bar, convergence meter, the charts in folding groups) and the Display sidebar (colour, diagram, view) — each folds to a tab, Monitor and Display dock left or right, the Monitor widens by its inner edge — the idiom of the WeaveSim viewer, LocalSH and the Joint FEA apps; info icons carry the operation hints |
+| `theory.html` | how the solver works, for reviewers and for readers without the maths (opened from *11 Theory* at the end of the menu): the Cosserat rod, second-order theory, the sliding contact point and reverse kinematics, the section-aware gap, friction, embedment, dynamic relaxation and its safeguards (the 17 Oct 2026 multiplier fix, pass-through) — every equation with its code location, interactive figures, light and dark, a plain-words reading mode; one self-contained page, KaTeX from `vendor/katex` |
 | `js/app.js` | scene / model management, panels, solve loop, picking (frames; whole laths for the lath groups), UTM replay, Rhino export |
 | `js/display_ui.js` | the Display sidebar: lath colouring and legend, member diagrams, joints overlay |
-| `js/disc_ui.js` | the discretisation: strip tab, section 8, plots, joints csv |
-| `js/protocol_ui.js` | the load-test protocol under Run: Zero → settle → pause (the 4 Contact box locks), the phase bands of the strip chart |
+| `js/monitor_ui.js` | the Monitor: fold / dock / width, the run bar and its convergence meter, the solver, stability and probe charts, the shared crosshair and tooltip; the Setup fold and its open section |
+| `js/knot_ui.js`, `js/knot_history.js` | Monitor › Knots: the followed crossings (picking, chips), small multiples of crossing quantities against a shared x, the table view; the lean per-crossing history they plot |
+| `js/stability.js` | Monitor › Stability: the eigenvalue nearest zero of the tangent stiffness and the number of unstable modes |
+| `js/info.js` | the info icons: hints on hover, focus or tap |
+| `js/disc_ui.js` | the discretisation: section 8 (parameters, weights, joints csv) and Monitor › Discretisation (run, plots) |
+| `js/protocol_ui.js` | the load-test protocol in the run bar: Zero → settle → pause (the 4 Contact box locks), the phase bands of the convergence chart |
 | `js/calib_ui.js` | the calibration panel |
 | `js/view.js` | three.js view: laths as swept sections on the current state (colour-map texture per fragment: exact gradients), centrelines, crossings, loads, anchors, probes, selection, diagrams, joints, lath selection, soft ground shadow |
 | `js/diagrams.js` | member diagrams (diagrams.py): Mx My Vy Vx T N curvature strips, deflected shape, contact forces, reactions, labels |
@@ -25,7 +30,8 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 | `js/scene.js`, `params.js`, `units.js` | `scene.json` (version 1) read and written exactly as the Python program; unit conversion |
 | `js/mesh.js`, `topology.js`, `pyset.js` | STL / OBJ, the kagome tracer — knot, strand and frame ids identical to the Python program (CPython set-iteration order emulated for the family colouring) |
 | `js/model.js`, `quat.js` | solver state, selectors, anchors, loads, section stiffness of the lath groups |
-| `js/solver_cpu.js` | the solver in f64: ActiveBeam (discrete elastic rod: stretch, anisotropic bending, twist, clamps, activation), PolylineContact (global parameter u, Hermite centreline, section-aware gap, lever-arm torque, Coulomb stick / slip, lock, W1 contact type, W2 rotational friction, W3 seat law, augmented Lagrangian), dynamic relaxation with kinetic damping |
+| `js/rod_cosserat.js` | the rod: discrete Cosserat rod (stretch, two shears, anisotropic bending, twist from the relative rotation of neighbouring segment frames, exact torques incl. the roll moment, clamp joints, activation) |
+| `js/solver_cpu.js` | the solver in f64: CpuSolver (dynamic relaxation of node positions and segment frames, kinetic damping), PolylineContact (global parameter u, Hermite centreline, section-aware gap, lever-arm torque, Coulomb stick / slip, lock, W1 contact type, W2 rotational friction, W3 seat law, augmented Lagrangian) |
 | `js/wgsl.js`, `js/solver_gpu.js` | the same solver as WGSL kernels, B instances per dispatch (see *Precision* and *Batching*) |
 | `js/utm.js`, `js/calibrate.js` | UTM csv import, the replay protocols, objective, sensitivity, fit (Latin hypercube + Nelder–Mead or CMA-ES), validation, synthetic data, parameter sets |
 | `js/plot.js`, `js/colormap.js`, `js/navcube.js`, `js/rng.js` | plots (lines, dots, bars), colour maps and palettes (the Python viewer's: matplotlib maps, family / group / over-under colours), the view cube (from LocalSH), seeded random numbers |
@@ -42,9 +48,14 @@ arithmetic in f32:
   to f32 once — the f32 error is relative to the local size (a segment, a crossing), never to the coordinate;
 * segment frames (quaternions) are 64-bit fixed point (2^-60) updated in delta form: a frame that does not move does
   not change by a bit (f32 frames re-rounded every iteration inject ~1e-7 rad of roll noise that the stiff twist mode
-  turns into kinetic energy, which trips the kinetic-damping reset and stalls convergence);
-* axial strain is computed against a per-segment reference edge (exact integer + f32 copy + f64 offset), so
-  `L − l0` never cancels;
+  turns into kinetic energy, which trips the kinetic-damping reset and stalls convergence); every relative rotation —
+  joint or clamp — is formed from the exact integer difference of the two quaternions, so the bending and twist
+  angles carry f32 precision relative to the (small) relative rotation;
+* the segment strain (stretch and the two shears) comes from the exact mismatch between the edge and the frame's axis,
+  formed with 64 × 64-bit integer products from the fixed-point quaternion: f32 precision relative to the strain itself
+  (an f32 frame alone leaves ~1e-7·EA of axial and ~1e-7·κGA of shear force noise per segment, a residual floor);
+* torques are accumulated in the body axes of the segment they act on, a joint's torque passed to its neighbour with
+  the exact relative rotation, so the bending moments that cancel at equilibrium carry no frame-rounding noise;
 * contact parameters u are 64-bit fixed point (segment index | 32-bit fraction), slips add exactly;
 * forces, torques and the contact twist stiffness are accumulated with 64-bit fixed-point atomics: sums are exact and
   independent of the thread order, so a run is **bit-for-bit reproducible** on a given GPU, and a calibration candidate
@@ -56,22 +67,29 @@ arithmetic in f32:
 Validation (Node and headless Chromium with SwiftShader, `tests/`):
 
 * topology: 12 cases identical to the Python program (strands, knots, frames, families, offsets);
-* CPU f64 against the Python solver: agreement to rounding (1e-15 relative) until the stick–slip dynamics amplify the
-  rounding — that divergence is in the Python program itself (two Python runs 1e-15 apart separate the same way);
-* GPU against CPU f64: beams to ~1e-7 relative (cantilever, edgewise, torsion), single crossings (stick, slip, locked,
-  W2/W3) to f32 level, the v5 dome tracks f64 to 1e-5 through 1500 iterations; later the woven scenes separate by the
-  same chaos (aggregates within 1 %);
+* the rod (CPU f64): forces and torques are the gradient of the energy to 1e-10 (finite differences); clamped
+  cantilever against Timoshenko 0.50 / 0.12 / 0.03 % at 10 / 20 / 40 segments, a short deep beam (30 % shear) 0.09 %,
+  beam-column amplification against Haringx 0.4–0.9 %, lateral–torsional buckling of a 60 × 6 mm strip from the
+  stability check at 21.0 N against 21.1 N (`rod_bench.mjs`, `stability_check.mjs`);
+* the Python program keeps the shear-free rod with frames slaved to the chords, so web and Python states now differ
+  by shear and the roll moment (topology, discretisation and the Rhino export still match Python exactly);
+* GPU against CPU f64 (`gpu_parity.html`, `selftest.html`): beams to ~1e-7 relative (cantilever, edgewise, torsion;
+  the clamped cantilever's tip deflection within 1e-5 of the CPU's, both 0.12 % from Timoshenko at 20 segments),
+  single crossings to ~1e-5 along the trajectory and 3–6e-4 at convergence — the spread of a CPU run perturbed by
+  1e-12 —, stick and slip until the first slip; the v5 dome tracks f64 to 1.2e-5 through 1000 iterations (the same
+  kinetic-damping resets), then separates where a nearly tied kinetic-damping reset goes the other way, as a CPU run
+  with f32-sized noise does;
 * contact floor: with a very stiff contact penalty the f32 contact forces carry noise of about k·w·6e-8 per crossing,
   which can hold the relative residual above a 1e-4 tolerance (single crossing with k = 1e4 N/mm: 1.8e-4). **f64 polish**
   (section 7) continues on the CPU from the GPU state;
-* UTM replay: the JS replay reproduces the Python replay to 4 decimals (all 16 increments of P1 in the force example),
-  6× faster on the CPU (23 s vs 136 s per objective evaluation); the GPU replay from the same relaxed state reproduces
-  the CPU replay to 4 decimals through the first load cycle.
+* UTM replay: the GPU replay from the same relaxed state reproduces the CPU replay to 4 decimals through the first
+  load branch, then stick–slip separates the unload branch; a calibration candidate gives a bit-identical objective
+  in any GPU batch (`calib_det.html`).
 
 ## Batching (GPU)
 
 One solver holds B instances of one topology (same nodes, segments, crossings, anchors) with their own parameters and
-state; every kernel is dispatched once per iteration for all of them (grid y = instance), six dispatches per iteration.
+state; every kernel is dispatched once per iteration for all of them (grid y = instance), four dispatches per iteration.
 The interactive model is B = 1. A calibration batch is B = parameter vectors × tests × replicas: a Latin-hypercube
 screening, a CMA-ES generation or a whole sensitivity sweep is one run. The fixed-point scales of a calibration are set
 once from the corners of the parameter box, so results do not depend on the batch composition. Real-GPU throughput
@@ -96,12 +114,12 @@ interactive run and a calibration share it and the driver interleaves them.
   along it, the value of the colour layer and of the diagram at that point — interpolated exactly as drawn — or the
   section forces Mx My T N when neither is shown; next to a crossing also its contact state (Fn, Ft, stick / slip, gap,
   slip, contact type).
-* **Load-test protocol** (strip, under Run; Python: `1 Internalize`): `Zero`
+* **Load-test protocol** (Monitor run bar): `Zero`
   takes the relaxed geometry as the reference (X0 = X, slip 0) and settles for the given iterations, then takes the
   settled state as the reference again and pauses (Run → Pause), so Results › *delta*
   after the load is the load displacement alone; the drift during the settle is reported. The crossings are not
-  touched: fastened joints are the *lock all crossings* box in 4 Contact (17 Oct 2026 — the strip's `Lock` button was
-  removed; it doubled the box and read like a solver freeze). The strip chart shades the phases in the
+  touched: fastened joints are the *lock all crossings* box in 4 Contact (17 Oct 2026 — a separate `Lock` button was
+  removed; it doubled the box and read like a solver freeze). The convergence chart shades the phases in the
   colour-annealing idiom — grey *relax*, sand *zero* with a
   dashed line at the planned end, blue *locked* while the box is ticked — and keeps the latest Zero in view. On the GPU the reference
   copy goes through a scratch buffer (WebGPU rejects a copy within one buffer; until 15 Oct the GPU kept its old
@@ -112,7 +130,7 @@ interactive run and a calibration share it and the driver interleaves them.
   at the extremes or per lath, *delta* against the internalised state, and — with joints — *around joints only*
   (±n crossings). Two deliberate differences from `diagrams.py`: the strip is split where the value changes sign (each
   part one colour), and closed strands get a diagram (Python leaves them at zero).
-* **Discretisation** (strip › Discretisation, section 8): `discretize.py` ported line by line — the same strands cut,
+* **Discretisation** (Monitor › Discretisation, section 8): `discretize.py` ported line by line — the same strands cut,
   joint counts, curvature, structural layer, objective components, normalisation and energy as Python on the same
   state (`tests/disc_check.mjs`: 3e-15). The annealing evaluates a neighbour incrementally (only the moved strand's
   terms and its row of strand-pair distances; 50× faster, same objective); its random numbers are xoshiro128**, so a

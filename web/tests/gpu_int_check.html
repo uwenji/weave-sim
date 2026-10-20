@@ -1,0 +1,64 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU 64-bit integer check</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// The 64-bit integer helpers of wgsl.js (I64_WGSL) on the GPU against BigInt: i64_mul60 = (a · b) >> 60 truncated toward
+// zero, i64_add / i64_sub / i64_shl1, for random operands in the solver's ranges (quaternion components |q| ≤ 1 in
+// 2^-60 units, rest lengths and edge vectors up to 2^62) and the edge cases (0, ±1, ±2^60, carries across words).
+import { I64_WGSL } from '../js/wgsl.js';
+import { getDevice } from '../js/solver_gpu.js';
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const M64 = (1n << 64n) - 1n;
+const toW = (v) => { const u = v & M64; return [Number(u & 0xffffffffn), Number(u >> 32n)]; };
+const fromW = (lo, hi) => { let v = (BigInt(hi) << 32n) | BigInt(lo); if (v >= 1n << 63n) v -= 1n << 64n; return v; };
+const mul60 = (a, b) => { const p = a * b, m = (p < 0n ? -p : p) >> 60n; return p < 0n ? -m : m; };
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  // operands: edge cases, then random magnitudes 2^k (k ≤ 61), both signs
+  let seed = 12345n; const rnd = () => { seed = (seed * 6364136223846793005n + 1442695040888963407n) & M64; return seed; };
+  const pairs = [];
+  const E = [0n, 1n, -1n, 1n << 60n, -(1n << 60n), (1n << 60n) - 1n, (1n << 32n) - 1n, 1n << 32n, -(1n << 32n), (1n << 61n) + 12345n, -((1n << 61n) - 7n), 0xffffffffn * 0x10001n];
+  for (const a of E) for (const b of E) pairs.push([a, b]);
+  for (let i = 0; i < 20000; i++) {
+    const ka = 1n + rnd() % 61n, kb = 1n + rnd() % 61n;
+    let a = rnd() & ((1n << ka) - 1n), b = rnd() & ((1n << kb) - 1n);
+    if (rnd() & 1n) a = -a; if (rnd() & 1n) b = -b;
+    pairs.push([a, b]);
+  }
+  const n = pairs.length, inp = new Uint32Array(4 * n);
+  pairs.forEach(([a, b], i) => { inp.set(toW(a), 4 * i); inp.set(toW(b), 4 * i + 2); });
+  const code = `${I64_WGSL}
+@group(0) @binding(0) var<storage, read> inp: array<u32>;
+@group(0) @binding(1) var<storage, read_write> res: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x; if (i >= ${n}u) { return; }
+  let a = vec2<u32>(inp[4u * i], inp[4u * i + 1u]); let b = vec2<u32>(inp[4u * i + 2u], inp[4u * i + 3u]);
+  let p = i64_mul60(a, b); let s = i64_add(a, b); let d = i64_sub(a, b); let h = i64_shl1(a);
+  res[8u * i] = p.x; res[8u * i + 1u] = p.y; res[8u * i + 2u] = s.x; res[8u * i + 3u] = s.y;
+  res[8u * i + 4u] = d.x; res[8u * i + 5u] = d.y; res[8u * i + 6u] = h.x; res[8u * i + 7u] = h.y;
+}`;
+  const module = dev.createShaderModule({ code });
+  const msgs = (await module.getCompilationInfo()).messages.filter(m => m.type === 'error');
+  if (msgs.length) { log('COMPILE ' + msgs.map(m => m.message).join('\n')); window.__done = true; return; }
+  const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  const bIn = dev.createBuffer({ size: inp.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const bOut = dev.createBuffer({ size: 32 * n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const bRd = dev.createBuffer({ size: 32 * n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(bIn, 0, inp);
+  const bg = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bIn } }, { binding: 1, resource: { buffer: bOut } }] });
+  const enc = dev.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(pipe); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(n / 64)); pass.end();
+  enc.copyBufferToBuffer(bOut, 0, bRd, 0, 32 * n); dev.queue.submit([enc.finish()]);
+  await bRd.mapAsync(GPUMapMode.READ); const r = new Uint32Array(bRd.getMappedRange().slice(0));
+  let bad = { mul: 0, add: 0, sub: 0, shl: 0 }, ex = null;
+  const wrap = (v) => { let u = v & M64; if (u >= 1n << 63n) u -= 1n << 64n; return u; };
+  pairs.forEach(([a, b], i) => {
+    const got = [fromW(r[8 * i], r[8 * i + 1]), fromW(r[8 * i + 2], r[8 * i + 3]), fromW(r[8 * i + 4], r[8 * i + 5]), fromW(r[8 * i + 6], r[8 * i + 7])];
+    const want = [mul60(a, b), wrap(a + b), wrap(a - b), wrap(2n * a)];
+    ['mul', 'add', 'sub', 'shl'].forEach((k, j) => { if (got[j] !== want[j]) { bad[k]++; if (!ex) ex = `${k}(${a}, ${b}) = ${got[j]}, expected ${want[j]}`; } });
+  });
+  log(`${n} operand pairs: mismatches i64_mul60 ${bad.mul}, i64_add ${bad.add}, i64_sub ${bad.sub}, i64_shl1 ${bad.shl}` + (ex ? `\nfirst: ${ex}` : '') + `\n${bad.mul + bad.add + bad.sub + bad.shl ? 'FAIL' : 'PASS'}`);
+  window.__done = true;
+})();
+</script></body></html>

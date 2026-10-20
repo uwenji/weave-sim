@@ -1,0 +1,49 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU rod bench</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// The clamped cantilever of rod_bench.mjs on the GPU: the rotation anchor (rX rY rZ at the root) acts through the clamp
+// joint; tip load 10 N flatwise / edgewise, L = 1000 mm, 60 × 30 mm, E 10 000, G 625 (κ = 5/6), and the short deep
+// beam (L = 200, edgewise 100 N, shear ≈ 30 % of the deflection). Tip deflection of the GPU and of the CPU at the same
+// tolerance, and of the CPU converged to 1e-10, against Timoshenko δ = FL³/3EI + FL/κGA.
+//   ?tol=1e-7  &nseg=10,20
+import { Scene } from '../js/scene.js';
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { straight } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const tol = +(q.get('tol') || 1e-7), segs = (q.get('nseg') || '10,20').split(',').map(Number);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const E = 1e4, G = 625, kap = 5 / 6, A = 1800;
+const tipNode = (st) => { let i = 0; for (let k = 0; k < st.n; k++) if (st.X[3 * k] > st.X[3 * i]) i = k; return i; };
+function model(L, nseg, dir, F, tl) {
+  const topo = straight(L, nseg), sc = new Scene();
+  sc.loads.gravity.enabled = false; sc.solver.tol = tl; sc.solver.max_iter = 400000;
+  sc.addAnchor({ type: 'frame', id: [0, 0] }, [1, 1, 1, 1, 1, 1]);
+  const sv = new CpuSolver(sc, topo, { contacts: false });
+  sv.loads.const[3 * tipNode(sv.st) + dir] -= F;
+  return sv;
+}
+const pct = (a, b) => `${(100 * (a / b - 1)).toFixed(3).padStart(7)} %`;
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  log(`clamped cantilevers, GPU and CPU at tol ${tol}, reference CPU at tol 1e-10`);
+  const runs = [];
+  for (const [dir, I, lbl] of [[2, 60 * 30 ** 3 / 12, 'flatwise'], [1, 30 * 60 ** 3 / 12, 'edgewise']]) for (const nseg of segs) runs.push({ L: 1000, nseg, dir, I, F: 10, lbl });
+  runs.push({ L: 200, nseg: 20, dir: 1, I: 30 * 60 ** 3 / 12, F: 100, lbl: 'short deep (edgewise)' });
+  for (const r of runs) {
+    const dT = r.F * r.L ** 3 / (3 * E * r.I) + r.F * r.L / (kap * G * A);
+    const ref = model(r.L, r.nseg, r.dir, r.F, 1e-10); while (!ref.converged && ref.st.iteration < 400000) ref.step(5000);
+    const cpu = model(r.L, r.nseg, r.dir, r.F, tol); while (!cpu.converged && cpu.st.iteration < 400000) cpu.step(5000);
+    const md = model(r.L, r.nseg, r.dir, r.F, tol), gpu = new GpuSolver(dev, [md], { perSubmit: 100 });
+    const msgs = await gpu.compileInfo(); if (msgs.some(m => m.startsWith('error'))) { log('COMPILE ' + msgs.join('\n')); break; }
+    let c; do { c = (await gpu.step(2000, { force: false }))[0]; } while (!c.done && c.iter < 200000);
+    await gpu.download(0);
+    const t = tipNode(md.st), dG = -md.st.X[3 * t + r.dir], dC = -cpu.st.X[3 * t + r.dir], dR = -ref.st.X[3 * t + r.dir];
+    log(`${r.lbl.padEnd(22)} L ${r.L} ${String(r.nseg).padStart(2)} seg  GPU δ ${dG.toFixed(6)} (${md.st.iteration} it, res ${md.st.residual.toExponential(2)}${md.converged ? '' : ' NOT CONVERGED'}) ${pct(dG, dT)}   CPU δ ${dC.toFixed(6)} (${cpu.st.iteration} it) ${pct(dC, dT)}   CPU 1e-10 δ ${dR.toFixed(6)} ${pct(dR, dT)}   GPU/CPU−1 ${((dG / dC - 1)).toExponential(2)}   Timoshenko ${dT.toFixed(6)}`);
+    gpu.dispose();
+  }
+  window.__done = true;
+})();
+</script></body></html>

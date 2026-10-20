@@ -79,7 +79,7 @@ export class View {
     this.ground.receiveShadow = true; this.ground.renderOrder = -2; this.scene.add(this.ground);
     this.group = new THREE.Group(); this.scene.add(this.group);
     this.layers = {};
-    this.visible = { mesh: true, wire: false, laths: true, lines: false, knots: true, loads: true, anchors: true, selection: true, probes: true, frames: false, shadow: true, diagram: true, joints: true, path: true };
+    this.visible = { mesh: true, wire: false, laths: true, lines: false, knots: true, loads: true, anchors: true, selection: true, probes: true, frames: false, shadow: true, diagram: true, joints: true, path: true, knotmarks: true };
     this.raycaster = new THREE.Raycaster();
     this.deform = 1.0; this.needsRender = true;
     this.colouring = { mode: 'family' };
@@ -476,6 +476,19 @@ export class View {
       }
       this._setLayer('probes', g);
     } else this._setLayer('probes', null);
+    // crossings followed in the Monitor's Knots group: a sphere in the series colour (seen through the laths) + label
+    const kms = (o.knotMarks || []).filter(k => this.knotNodes && k.c >= 0 && 2 * k.c + 1 < this.knotNodes.length);
+    if (kms.length) {
+      const g = new THREE.Group(), r = 1.9 * this.knotR;
+      for (const k of kms) {
+        const ia = this.knotNodes[2 * k.c], ib = this.knotNodes[2 * k.c + 1];
+        const p = new THREE.Vector3(0.5 * (P[3 * ia] + P[3 * ib]), 0.5 * (P[3 * ia + 1] + P[3 * ib + 1]), 0.5 * (P[3 * ia + 2] + P[3 * ib + 2]));
+        const sph = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), new THREE.MeshBasicMaterial({ color: new THREE.Color(k.color), transparent: true, opacity: 0.9, depthTest: false }));
+        sph.scale.setScalar(r); sph.position.copy(p); sph.renderOrder = 5; g.add(sph);
+        if (k.label) g.add(this._label(k.label, k.color, p.clone().add(new THREE.Vector3(0, 0, 3.2 * r)), 0.032 * d));
+      }
+      this._setLayer('knotmarks', g);
+    } else this._setLayer('knotmarks', null);
     // node frames (X red, Y green, Z blue) at the crossings
     if (o.frames && this.nodeR && this.st) {
       const L = this.knotR * 3, pts = [], cols = [];

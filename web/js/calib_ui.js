@@ -33,7 +33,7 @@ export function initCalibration(ctx) {
       <h3>parameters <span class="unit" id="cal-units"></span></h3>
       <table class="tbl" id="cal-params"></table>
       <details class="sub"><summary>replay protocol</summary><div class="grid2" id="cal-replay"></div>
-        <p class="hint">force mode = the cable pull: n_steps increments up to the peak force and back, cycles times; crosshead travel = probe travel + F / pad_stiffness. Chaos replicas &gt; 1 replay every test from slightly perturbed copies of the relaxed state and average the residuals — the stick–slip replay is chaotic, one replay is one sample of a noisy objective.</p></details>
+        <div class="row end"><button type="button" class="info" aria-label="About the replay protocol" data-tip="Force mode is the cable pull: n_steps increments up to the peak force and back, cycles times; crosshead travel = probe travel + F / pad_stiffness.\nChaos replicas &gt; 1 replay every test from slightly perturbed copies of the relaxed state and average the residuals: the stick–slip replay is chaotic, one replay is one sample of a noisy objective.">i</button></div></details>
       <div class="row"><label>run on</label><div class="chips inline" id="cal-backend"><button class="chip" data-b="gpu">WebGPU batch</button><button class="chip" data-b="cpu">CPU f64</button></div>
         <label for="cal-maxinst" title="GPU instances per batch (parameter vectors × tests × replicas)">batch ≤</label><input type="number" id="cal-maxinst" class="num xs" min="1" step="1" value="192"></div>
       <div class="row buttons">
@@ -44,7 +44,7 @@ export function initCalibration(ctx) {
       </div>
       <div class="row buttons">
         <button id="cal-fit" class="btn primary">Fit</button>
-        <select id="cal-method"><option value="cmaes">CMA-ES (population batches)</option><option value="nm">Nelder–Mead (Python fit)</option></select>
+        <select id="cal-method"><option value="cmaes">CMA-ES (population batches)</option><option value="nm">Nelder–Mead</option></select>
         <label for="cal-ninit">LHS</label><input type="number" id="cal-ninit" class="num xs" min="2" step="1" value="8">
         <label for="cal-maxeval">evals</label><input type="number" id="cal-maxeval" class="num xs" min="4" step="1" value="60">
         <label for="cal-seed">seed</label><input type="number" id="cal-seed" class="num xs" step="1" value="1">

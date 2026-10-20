@@ -1,6 +1,6 @@
 // The Display sidebar (the Joint FEA "display tools" idiom, beside the view, folds to a narrow tab, docks left or
 // right): lath colouring (family, pure colour, over / under, pieces, lath group, strand, or a result layer with the
-// Python viewer's palettes, smooth along the laths or per segment, bands, delta, range), the member diagrams with their
+// viewer's palettes, smooth along the laths or per segment, bands, delta, range), the member diagrams with their
 // labels and the joint-zone option, and the joints overlay of the discretisation. The View section of the sidebar
 // (theme, layers, deformation, arrows, turntable) is bound in app.js.
 import { DIAGRAMS, DIAGRAM_LABELS, DIAGRAM_AXIS, buildDiagram, diagramUnit } from './diagrams.js';
@@ -32,7 +32,7 @@ export function initDisplay(ctx) {
   const app = $('app');
   const setDock = (left) => { app.classList.toggle('display-left', left); store.set('displayLeft', left); };
   const setOpen = (open) => { app.classList.toggle('display-closed', !open); store.set('displayOpen', open); $('display-toggle').setAttribute('aria-expanded', String(open)); };
-  setDock(!!store.get('displayLeft', false)); setOpen(store.get('displayOpen', true) !== false);
+  setDock(!!store.get('displayLeft', false)); setOpen(store.get('displayOpen', window.innerWidth >= 1500) !== false);   // narrow screens start with it folded
   $('display-toggle').onclick = () => setOpen(app.classList.contains('display-closed'));
   $('display-dock').onclick = () => setDock(!app.classList.contains('display-left'));
 
@@ -60,7 +60,7 @@ export function initDisplay(ctx) {
       if (sel === 'plain') c.color = hex($('in-purecolour').value);
       if (sel === 'pieces') c.pieces = pieceIndex(A.scene, A.model.st);
       view.setColouring(c); weaveLegend(sel);
-      if (sel === 'pieces' && !hasJoints()) ctx.status('no joints yet — strip › Discretisation › Run');
+      if (sel === 'pieces' && !hasJoints()) ctx.status('no joints yet — Monitor › Discretisation › Run');
       return;
     }
     if (!A.results) { view.setColouring({ mode: 'plain', color: [0.80, 0.80, 0.78] }); lg.hidden = true; $('ro-extremes').textContent = 'no results yet — Run or Step'; return; }

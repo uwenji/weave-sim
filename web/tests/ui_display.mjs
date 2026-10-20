@@ -1,5 +1,5 @@
 // Headless check of the display features (SwiftShader): ground shadow, lath colours (family / layer smooth / bands),
-// member diagrams with labels, the discretisation (strip tab, annealing, joints, pieces, joint-zone diagram), lath
+// member diagrams with labels, the discretisation (Monitor group, annealing, joints, pieces, joint-zone diagram), lath
 // selection for the groups (LocalSH idiom), the Rhino export (download → ref_out/ui/<scene>.3dm), zoom responsiveness,
 // the Display sidebar (fold, dock left). Screenshots → ref_out/ui/d_*.png.
 //   node web/tests/ui_display.mjs [out] [cpu|webgpu] [scene query]
@@ -26,7 +26,7 @@ const page = await context.newPage();
 const errors = [];
 page.on('console', m => { const t = m.text(); if (t.includes('experimental on this platform')) return; if (m.type() === 'error' || m.type() === 'warning') errors.push(`${m.type()}: ${t}`); if (m.type() !== 'debug') console.log(`[${m.type()}] ${t}`); });
 page.on('pageerror', e => { errors.push('PAGEERROR ' + e.message); console.log('PAGEERROR', e.message, e.stack); });
-await page.addInitScript((b) => { try { localStorage.clear(); localStorage.setItem('weavesim.backend', JSON.stringify(b)); } catch (e) {} }, backend);
+await page.addInitScript((b) => { try { localStorage.clear(); localStorage.setItem('weavesim.displayOpen', 'true'); localStorage.setItem('weavesim.backend', JSON.stringify(b)); } catch (e) {} }, backend);
 await page.goto(`http://localhost:${port}/web/index.html${process.argv[4] ? '?' + process.argv[4] : ''}`);
 const shot = async (name) => { await page.waitForTimeout(300); await page.screenshot({ path: `${out}/d_${name}.png` }); console.log('shot', name); };
 const text = (sel) => page.$eval(sel, el => el.textContent);
@@ -52,7 +52,7 @@ if (!(zoom.renders >= 1 && zoom.d1 < zoom.d0)) errors.push('zoom did not render'
 await page.fill('#nb-step', '1500'); await page.click('#btn-step');
 await page.waitForFunction(() => window.weavesim.model && window.weavesim.model.st.iteration >= 1500 && !window.weavesim.busy, null, { timeout: 600000 });
 await page.waitForTimeout(1200);
-console.log('after step:', await text('#strip-text'));
+console.log('after step:', await text('#run-text'));
 await select('#sel-colour', 'Mx');
 console.log('legend:', await text('#legend-title'), '|', await text('#legend-lo'), await text('#legend-hi'));
 const lathMat = () => page.evaluate(() => window.weavesim.view.layers.laths.material === window.weavesim.view.matLut ? 'lut' : 'vertex colours');
@@ -97,8 +97,8 @@ console.log('per-strand labels:', await page.$$eval('#labels .dlabel', els => el
 await page.selectOption('#sel-dlabels', '1'); await page.dispatchEvent('#sel-dlabels', 'change');
 
 // --- discretisation --------------------------------------------------------------------------------------------------
-await page.click('#strip-tabs [data-tab="disc"]');
-await page.evaluate(() => { document.querySelectorAll('details.sec').forEach(d => { d.open = d.id === 'sec-disc'; }); });
+await page.evaluate(() => { document.getElementById('mon-disc').open = true; });
+await page.evaluate(() => { document.querySelectorAll('#sections > details.sec').forEach(d => { d.open = d.id === 'sec-disc'; }); });
 await page.evaluate(() => { const el = document.getElementById('nb-diter'); el.value = 150; el.dispatchEvent(new Event('change', { bubbles: true })); });
 await page.click('#btn-disc-run');
 await page.waitForFunction(() => !window.weavesim.discRunning && window.weavesim.disc && window.weavesim.disc.done, null, { timeout: 300000 });
@@ -111,10 +111,10 @@ console.log('zone diagram:', await text('#ro-diagram'));
 await shot('09_zone');
 await page.click('#ck-zone'); await page.click('#diag-chips [data-diag="none"]');
 await select('#sel-colour', 'family');
-await page.click('#strip-tabs [data-tab="solve"]');
+await page.evaluate(() => { document.getElementById('mon-disc').open = false; });
 
 // --- lath selection for the groups ------------------------------------------------------------------------------------
-await page.evaluate(() => { document.querySelectorAll('details.sec').forEach(d => { d.open = d.id === 'sec-material'; }); });
+await page.evaluate(() => { document.querySelectorAll('#sections > details.sec').forEach(d => { d.open = d.id === 'sec-material'; }); });
 const hybrid = await page.$eval('#ck-hybrid', el => el.checked);
 if (!hybrid) { await page.click('#ck-hybrid'); await page.waitForTimeout(800); }
 await page.click('#btn-lathmode');
@@ -144,7 +144,7 @@ if (afterEsc.sel || afterEsc.tube || afterEsc.mode !== 'none') errors.push('lath
 await shot('10b_after_esc');
 
 // --- Rhino export ----------------------------------------------------------------------------------------------------
-await page.evaluate(() => { document.querySelectorAll('details.sec').forEach(d => { d.open = d.id === 'sec-file'; }); });
+await page.evaluate(() => { document.querySelectorAll('#sections > details.sec').forEach(d => { d.open = d.id === 'sec-file'; }); });
 const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 120000 }), page.click('#btn-3dm')]);
 const file = path.join(out, dl.suggestedFilename()); await dl.saveAs(file);
 await page.waitForFunction(() => /objects|failed/.test(document.getElementById('ro-3dm').textContent), null, { timeout: 120000 });

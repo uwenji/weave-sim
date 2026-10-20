@@ -74,7 +74,18 @@ export function interp(x, xp, fp) {
 }
 
 const UNIT_RE = /[([]\s*([a-zA-Zµ]+)\s*[)\]]/;
+/** the column delimiter: tab or semicolon when it splits the first lines into the same number of fields (exports with a
+ *  decimal comma, e.g. Mecmesin VectorPro "0,533;0;-212,73" — the comma outnumbers the semicolon there), else the most
+ *  frequent of , ; tab */
 function delimiter(text) {
+  const lines = text.slice(0, 16384).split(/\r?\n/).filter(l => l.trim()).slice(0, 25);
+  const consistent = (d) => {                     // the most common field count is nonzero and shared by ≥ 70 % of the lines
+    const c = lines.map(l => l.split(d).length - 1), freq = new Map();
+    for (const v of c) if (v > 0) freq.set(v, (freq.get(v) || 0) + 1);
+    let best = 0; for (const n of freq.values()) best = Math.max(best, n);
+    return c.length > 0 && best >= 0.7 * c.length;
+  };
+  for (const d of ['\t', ';']) if (consistent(d)) return d;
   const head = text.slice(0, 8192);
   const counts = { ',': head.split(',').length - 1, ';': head.split(';').length - 1, '\t': head.split('\t').length - 1 };
   let best = ','; for (const k of [',', ';', '\t']) if (counts[k] > counts[best]) best = k;
@@ -135,5 +146,8 @@ export function parseUTMCsv(text, to, { forceCol = null, dispCol = null, fileUni
   const unitOf = (h) => { const m = UNIT_RE.exec(h); return m ? m[1] : null; };
   const fu = fileUnits?.force || unitOf(headers[fi]) || 'N', lu = fileUnits?.length || unitOf(headers[di]) || 'mm';
   const fFac = (FORCE_TO_N[fu] ?? 1.0) / to.F, lFac = (LENGTH_TO_M[lu] ?? 1e-3) / to.L;
-  return new UTMCurve(D.map(v => v * lFac), F.map(v => v * fFac), T, source, { force: headers[fi], displacement: headers[di], force_unit: fu, length_unit: lu });
+  // an absolute crosshead position (e.g. Mecmesin "Displacement (mm)" from −212.7 to −112.7) becomes travel from the
+  // first sample; records that already start near zero (|d0| ≤ 5 % of the range) are kept as they are
+  let d0 = 0; if (D.length) { let lo = Infinity, hi = -Infinity; for (const v of D) { lo = Math.min(lo, v); hi = Math.max(hi, v); } if (Math.abs(D[0]) > 0.05 * Math.max(hi - lo, 1e-300)) d0 = D[0]; }
+  return new UTMCurve(D.map(v => (v - d0) * lFac), F.map(v => v * fFac), T, source, { force: headers[fi], displacement: headers[di], force_unit: fu, length_unit: lu, zeroed: d0 });
 }

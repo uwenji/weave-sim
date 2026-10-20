@@ -1,6 +1,6 @@
 // Load-test protocol on the WebGPU solver (headless Chromium, SwiftShader): relax → Zero (settle) → the settled state
 // is the reference on the host and the GPU, the solver pauses with the crossings untouched; the 4 Contact box then locks
-// them on both; a load and a run give a delta; strip screenshots (settling, zeroed, loaded) for a look at the bands.
+// them on both; a load and a run give a delta; Monitor screenshots (settling, zeroed, loaded) for a look at the bands.
 // node tests/ui_protocol.mjs [outdir]
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
 import { ROOT, launchChromium } from './paths.mjs';
@@ -12,11 +12,11 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, dev
 const errors = [];
 page.on('console', m => { const t = m.text(); if (m.type() === 'error' && !t.includes('ERR_TUNNEL') && !t.includes('status of 404')) { errors.push(t); console.log('CONSOLE ERROR', t); } });
 page.on('pageerror', e => { errors.push('PAGEERROR ' + e.message); console.log('PAGEERROR', e.message, e.stack); });
-await page.addInitScript(() => { try { localStorage.setItem('weavesim.backend', '"webgpu"'); localStorage.setItem('weavesim.theme', '"light"'); } catch (e) {} });
+await page.addInitScript(() => { try { localStorage.setItem('weavesim.displayOpen', 'true'); localStorage.setItem('weavesim.backend', '"webgpu"'); localStorage.setItem('weavesim.theme', '"light"'); } catch (e) {} });
 await page.goto(`http://localhost:${server.address().port}/web/index.html`);
 const W = (fn, arg) => page.evaluate(fn, arg);
 const ok = (c, msg) => { console.log((c ? 'ok   ' : 'FAIL ') + msg); if (!c) errors.push('FAIL ' + msg); };
-const shot = async (name) => { if (out) { fs.mkdirSync(out, { recursive: true }); await page.locator('#strip').screenshot({ path: path.join(out, name) }); } };
+const shot = async (name) => { if (out) { fs.mkdirSync(out, { recursive: true }); await page.locator('#monitor').screenshot({ path: path.join(out, name) }); } };
 await page.waitForFunction(() => document.getElementById('st-topo').textContent.includes('strands') && window.weavesim.gpu, null, { timeout: 120000 });
 ok(await W(() => window.weavesim.backend === 'webgpu'), 'WebGPU backend');
 // relax
@@ -27,12 +27,12 @@ const i0 = await W(() => window.weavesim.model.st.iteration);
 await page.fill('#nb-zero-steps', '600'); await page.dispatchEvent('#nb-zero-steps', 'change');
 await page.click('#btn-zero');
 await page.waitForFunction((a) => window.weavesim.model.st.iteration >= a + 250 || !window.weavesim.protocol.phase, i0, { timeout: 300000 });
-const mid = await W(() => ({ on: document.getElementById('btn-zero').classList.contains('on'), fill: document.getElementById('btn-zero').style.getPropertyValue('--p'), phase: !!window.weavesim.protocol.phase, text: document.getElementById('strip-text').textContent }));
+const mid = await W(() => ({ on: document.getElementById('btn-zero').classList.contains('on'), fill: document.getElementById('btn-zero').style.getPropertyValue('--p'), phase: !!window.weavesim.protocol.phase, text: document.getElementById('run-text').textContent }));
 ok(!mid.phase || (mid.on && parseFloat(mid.fill) > 0), `settling on the GPU: button lit, fill ${mid.fill} · ${mid.text.split('N·cm').pop()}`);
-await shot('strip_settling.png');
+await shot('monitor_settling.png');
 await page.waitForFunction(() => !window.weavesim.protocol.phase && !window.weavesim.running && !window.weavesim.busy, null, { timeout: 300000 });
 await page.waitForTimeout(300);
-await shot('strip_zeroed.png');
+await shot('monitor_zeroed.png');
 // host and GPU agree: reference = settled state, slip zero, crossings untouched (free)
 const r = await W(async () => {
   const A = window.weavesim, st = A.model.st, P = A.protocol;
@@ -41,7 +41,7 @@ const r = await W(async () => {
   const dev = { X: Array.from(st.X), X0: Array.from(st.X0), slip: Array.from(st.slip), lock: Array.from(A.model.contact.locked) };
   let dX = 0, dX0 = 0, dRef = 0; for (let i = 0; i < host.X.length; i++) { dX = Math.max(dX, Math.abs(host.X[i] - dev.X[i])); dX0 = Math.max(dX0, Math.abs(host.X0[i] - dev.X0[i])); dRef = Math.max(dRef, Math.abs(dev.X[i] - dev.X0[i])); }
   return { it: host.it, last: { ...P.last }, phases: P.phases.map(p => `${p.kind} ${p.i0}-${p.end}`), dX, dX0, dRef, slipH: Math.max(0, ...host.slip.map(Math.abs)), slipD: Math.max(0, ...dev.slip.map(Math.abs)),
-    lockH: host.lock.some(Boolean), lockD: dev.lock.some(Boolean), text: document.getElementById('strip-text').textContent, win: A.chartWin };
+    lockH: host.lock.some(Boolean), lockD: dev.lock.some(Boolean), text: document.getElementById('run-text').textContent, win: A.chartWin };
 });
 ok(r.last.i0 === i0 && r.it === r.last.end && r.it <= i0 + 600, `settle ${r.last.i0} → ${r.last.end} (${r.last.conv ? 'converged' : 'planned end'}), drift ${r.last.drift.toPrecision(3)} · paused`);
 ok(!r.lockH && !r.lockD, 'no crossing locked by the settle, on the host or on the GPU');
@@ -59,13 +59,13 @@ await page.selectOption('#sel-loaddir', 'world'); await page.fill('#nb-lmag', '3
 await page.fill('#nb-step', '400'); await page.click('#btn-step');
 await page.waitForFunction((a) => window.weavesim.model.st.iteration >= a + 400 && !window.weavesim.busy, r.it, { timeout: 300000 });
 await page.waitForTimeout(300);
-await shot('strip_loaded.png');
+await shot('monitor_loaded.png');
 const l = await W(() => { const A = window.weavesim, st = A.model.st; let d = 0; for (let i = 0; i < st.X.length; i++) d = Math.max(d, Math.abs(st.X[i] - st.X0[i])); let s = 0; for (const v of st.slip) s = Math.max(s, Math.abs(v));
-  return { d, s, lock: A.model.contact.locked.every(Boolean), bands: A.chartWin.bands, text: document.getElementById('strip-text').textContent }; });
+  return { d, s, lock: A.model.contact.locked.every(Boolean), bands: A.chartWin.bands, text: document.getElementById('run-text').textContent }; });
 ok(l.lock && l.d > 0, `loaded: crossings still locked, max displacement from the reference ${l.d.toPrecision(3)}, slip ${l.s.toPrecision(3)}`);
 ok(l.bands.some(b => b.startsWith('locked ')) && l.text.includes('delta from here'), `bands ${l.bands.join(' | ')} · …${l.text.split('N·cm').pop()}`);
 // the dark theme draws too
 await W(() => { document.documentElement.setAttribute('data-theme', 'dark'); window.dispatchEvent(new Event('resize')); });
-await page.waitForTimeout(300); await shot('strip_loaded_dark.png');
+await page.waitForTimeout(300); await shot('monitor_loaded_dark.png');
 console.log(errors.length ? 'ERRORS:\n' + errors.join('\n') : 'ALL OK');
 await browser.close(); server.close();

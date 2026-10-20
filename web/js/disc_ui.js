@@ -1,10 +1,11 @@
-// Discretisation (joint placement) in the app: the strip's Discretisation tab (Run / Pause, Step, Reset, the annealing
-// plot — the Python viewer's bottom bar), section 8 (stock / joint length, extra joints, annealing parameters, objective
-// weights with the structural layer, the components and piece-length plots, joints csv). Runs time-sliced in the
-// animation frame; every published placement goes to scene.joints (saved with the scene, exported to Rhino) and to the
-// view (cuts, pieces colouring, joint-zone diagrams).
+// Discretisation (joint placement) in the app: the Monitor's Discretisation group (Run / Pause, Step, Clear joints, the
+// annealing plot, the objective components and the piece lengths) and section 8 (stock / joint length, extra joints,
+// annealing parameters, objective weights with the structural layer, joints csv). Runs time-sliced in the animation
+// frame; every published placement goes to scene.joints (saved with the scene, exported to Rhino) and to the view
+// (cuts, pieces colouring, joint-zone diagrams).
 import { Discretizer, geometryFromModel, discretizeParams, OBJECTIVES, OBJECTIVE_LABELS, OBJECTIVE_SHORT, STRUCTURAL_LAYERS, jointPoints, jointsCSV } from './discretize.js';
-import { drawPlot } from './plot.js';
+import { drawPlot, watchCanvas } from './plot.js';
+import { CHART_L } from './monitor_ui.js';
 import { fmtG } from './fields.js';
 
 export function initDiscretize(ctx) {
@@ -13,14 +14,8 @@ export function initDiscretize(ctx) {
   let lastPublish = 0;
   const P = () => (A.scene.discretize = discretizeParams(A.scene.discretize));
 
-  // --- strip tabs (Solver | Discretisation) -------------------------------------------------------------------------
-  function setTab(t) {
-    A.stripTab = t; store.set('stripTab', t);
-    qsa('#strip-tabs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tab === t)));
-    $('strip-solve').hidden = t !== 'solve'; $('strip-disc').hidden = t !== 'disc'; $('sel-chart').hidden = t !== 'solve';
-    if (t === 'disc') drawChart(); else ctx.drawSolveChart();
-  }
-  qsa('#strip-tabs button').forEach(b => { b.onclick = () => setTab(b.dataset.tab); });
+  const shown = () => ctx.shown('mon-disc');
+  ['disc-chart', 'disc-comp', 'disc-pieces'].forEach(id => watchCanvas($(id), () => { drawChart(); drawPlots(); }));
 
   // --- parameters and weights ---------------------------------------------------------------------------------------
   const WEIGHT_LABEL = { sum_curve: 'Σ κ at joints', max_curve: 'max κ at joints', min_dist: 'joint spacing', uniformity_range: 'longest − shortest', uniformity_sum: 'Σ |piece − mean|', structural: 'structural', clearance: 'clear of crossings' };
@@ -83,7 +78,7 @@ export function initDiscretize(ctx) {
     if (A.disc.done || performance.now() - lastPublish > 150) publish();
     if (A.disc.done) { A.discRunning = false; runButton(); status(`discretisation done: objective ${A.disc.historyBest[0].toFixed(3)} → ${A.disc.ebest.toFixed(3)}`); }
   }
-  function runButton() { const b = $('btn-disc-run'); b.textContent = A.discRunning ? 'Pause' : 'Run'; b.classList.toggle('running', A.discRunning); }
+  function runButton() { const b = $('btn-disc-run'); b.textContent = A.discRunning ? 'Pause' : 'Run'; b.classList.toggle('running', A.discRunning); if (A.scene) readouts(); }
   $('btn-disc-run').onclick = () => {
     if (!A.discRunning && !A.disc && !start()) return;
     if (!A.discRunning && A.disc && A.disc.done) { status('the annealing is done — Reset to start again (or raise the temperature steps)'); return; }
@@ -101,43 +96,46 @@ export function initDiscretize(ctx) {
     if (d) {
       txt = `${d.nJoints.reduce((a, b) => a + b, 0)} joints · ${d.geo.length} strands cut · step ${d.iteration}/${p.iterations} · T ${d.T.toExponential(2)} · ${d.nEval} evaluations`;
       if (d.done) txt += `\ndone: objective ${d.historyBest[0].toFixed(3)} → ${d.ebest.toFixed(3)}`;
-    } else txt = `cuts the laths into ${fmtG(p.max_length, 4)} ${u} pieces (joint ${fmtG(p.joint_length, 3)} ${u}) on the current geometry${A.model && A.model.st.iteration > 0 ? ' (solved)' : ''}; results feed the structural objective — parameters in 8 Discretisation`;
+    } else txt = `cuts the laths into ${fmtG(p.max_length, 4)} ${u} pieces (joint ${fmtG(p.joint_length, 3)} ${u}) on the current geometry${A.model && A.model.st.iteration > 0 ? ' (solved)' : ''}`;
     $('disc-text').textContent = txt;
     const J = A.scene.joints || {}, nj = Object.values(J).reduce((a, v) => a + (v ? v.length : 0), 0), ns = Object.values(J).filter(v => v && v.length).length;
     $('ro-joints').textContent = nj ? `${nj} joints on ${ns} strands` : 'none';
     $('btn-joints-csv').disabled = !nj;
-    $('sum-disc').textContent = nj ? `${nj} joints` : '';
+    $('sum-disc').textContent = nj ? `${nj} joints` : ''; $('sum-mon-disc').textContent = A.discRunning ? 'running' : nj ? `${nj} joints` : '';
     $('ro-dneeds').textContent = (p.weights.structural || 0) > 0 && !(A.results && A.model && A.model.st.iteration > 0) ? 'needs a solve' : '';
   }
   function drawChart() {
-    if (A.stripTab !== 'disc') return;
-    const d = A.disc, series = [];
+    if (!shown()) return;
+    const d = A.disc, series = [], cB = cssv('--accent'), cC = cssv('--dim');
+    const lg = $('disc-legend');
+    if (!lg.childElementCount) lg.innerHTML = `<span class="k" style="--c:${cB}">best</span><span class="k" style="--c:${cC}">current</span>`;
+    else { lg.children[0].style.setProperty('--c', cB); lg.children[1].style.setProperty('--c', cC); }
     if (d && d.historyBest.length) {
       const xs = d.historyBest.map((_, i) => i);
-      series.push({ x: xs, y: d.historyCurrent, color: cssv('--dim'), width: 1 });
-      series.push({ x: xs, y: d.historyBest, color: cssv('--accent'), width: 1.8 });
+      series.push({ x: xs, y: d.historyCurrent, color: cC, width: 1.2 });
+      series.push({ x: xs, y: d.historyBest, color: cB, width: 2 });
     }
-    drawPlot($('disc-chart'), { series, compact: true, empty: 'no annealing yet — Run or Step' });
+    drawPlot($('disc-chart'), { series, L: CHART_L, empty: 'no annealing yet — Run or Step' });
   }
   function drawPlots() {
+    if (!shown()) return;
     const r = A.discResult, names = r ? OBJECTIVES.filter(n => n in r.normalised_final) : [];
     const xs = names.map((_, i) => i);
     drawPlot($('disc-comp'), {
       series: names.length ? [{ x: xs.map(x => x - 0.2), y: names.map(n => r.normalised_initial[n] ?? 0), bars: true, barWidth: 0.38, color: cssv('--dim'), label: 'initial' },
         { x: xs.map(x => x + 0.2), y: names.map(n => r.normalised_final[n] ?? 0), bars: true, barWidth: 0.38, color: cssv('--accent'), label: 'final' }] : [],
-      xticks: names.map((n, i) => ({ x: i, label: OBJECTIVE_SHORT[n] })), ylabel: 'initial = 1', legend: 'top', ymin: 0, compact: true, empty: 'objective components (normalised)',
+      xticks: names.map((n, i) => ({ x: i, label: OBJECTIVE_SHORT[n] })), legend: 'top', ymin: 0, L: CHART_L, empty: 'objective components after a Run',
     });
     const d = A.disc, lens = d ? d.pieces(d.xbest).flatMap(a => [...a]) : [];
     let series = [];
     if (lens.length) {
       const lo = Math.min(...lens), hi = Math.max(...lens), nb = 12, w = (hi - lo) / nb || 1, counts = new Array(nb).fill(0);
       for (const v of lens) counts[Math.min(nb - 1, Math.floor((v - lo) / w))]++;
-      series = [{ x: counts.map((_, i) => lo + (i + 0.5) * w), y: counts, bars: true, barWidth: w, color: cssv('--chart-2') }];
+      series = [{ x: counts.map((_, i) => lo + (i + 0.5) * w), y: counts, bars: true, barWidth: w, color: cssv('--s1') }];
     }
-    drawPlot($('disc-pieces'), { series, xlabel: `piece length [${A.scene ? A.scene.units.length : ''}]`, ymin: 0, compact: true, empty: 'piece lengths' });
+    drawPlot($('disc-pieces'), { series, xlabel: `piece length [${A.scene ? A.scene.units.length : ''}]`, ymin: 0, L: CHART_L, empty: 'piece lengths after a Run' });
   }
 
-  setTab(store.get('stripTab', 'solve') === 'disc' ? 'disc' : 'solve');
   return {
     onScene() { A.disc = null; A.discResult = null; A.discRunning = false; runButton(); sync(); drawChart(); },
     onResults() { readouts(); },

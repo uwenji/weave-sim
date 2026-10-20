@@ -1,12 +1,14 @@
 // Batched dynamic relaxation on WebGPU. B instances of one topology run in the same dispatches (grid y = instance):
 // one interactive model (B = 1), or a calibration population × UTM tests. The host-side model of every instance is a
 // CpuSolver (setup, rebuilds after scene edits, results): upload() copies its state and parameters to the GPU,
-// download() copies the GPU state back into it, so CpuSolver.results() / rebuildGoals() work on the GPU state.
-// See wgsl.js for the kernels and the precision scheme.
+// download() copies the GPU state back into it, so CpuSolver.results() / rebuildGoals() / step() work on the GPU state.
+// The kernels run the algorithm of CpuSolver.step with the Cosserat rod of rod_cosserat.js (node positions, a full
+// rotation and a 3-axis body angular velocity per segment, clamp joints for the rotation anchors) — four dispatches per
+// iteration; see wgsl.js for the kernels and the precision scheme.
 import { solverWGSL } from './wgsl.js';
 import { PolylineContact, AL_FREE_MIN } from './solver_cpu.js';
 
-const WG = 64, HN = 4096, NOUT = 64, NCT = 32, NIP = 108;
+const WG = 64, HN = 4096, HS = 9, NOUT = 64, NCT = 36, NIP = 108;
 const TWO32 = 4294967296;
 
 export async function getDevice() {
@@ -27,6 +29,7 @@ const ceilLog2 = (x) => Math.ceil(Math.log2(Math.max(x, 1e-30)));
 // compiled pipelines per device and shader source (a calibration builds many solvers of the same sizes)
 const PIPES = new WeakMap();
 const clampi = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const sameInts = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 /** integer of x · 2^bits (x f64) as [lo, hi] u32 words (two's complement) */
 function toI64(x, bits) {
@@ -50,6 +53,8 @@ function diffI64(alo, ahi, blo, bhi, bits) {
   let hi = (ahi - bhi - borrow) >>> 0;
   return fromI64(lo >>> 0, hi, bits);
 }
+/** quaternions (4 per entry, f64) → 64-bit fixed-point words (2^-60) */
+function quatWords(Q) { const w = new Uint32Array(2 * Q.length); for (let k = 0; k < Q.length; k++) { const [lo, hi] = toI64(Q[k], 60); w[2 * k] = lo; w[2 * k + 1] = hi; } return w; }
 
 export class GpuSolver {
   /** models: CpuSolver[] sharing one topology (the first defines the sizes); opts.perSubmit: iterations per command
@@ -58,25 +63,27 @@ export class GpuSolver {
     this.dev = device; this.models = models; this.B = models.length; this.backend = 'webgpu';
     this.perSubmit = opts.perSubmit || 64;
     const m0 = models[0], st = m0.st;
-    const N = st.n, M = st.m, P = st.p, K = m0.contact ? st.K : 0, C = m0.anchors.clamps.length, B = this.B;
-    for (const md of models) if (md.st.n !== N || md.st.m !== M || (md.contact ? md.st.K : 0) !== K || md.anchors.clamps.length !== C) throw new Error('GpuSolver: all instances must share one topology, contact setting and anchors');
+    const N = st.n, M = st.m, P = st.p, K = m0.contact ? st.K : 0, C = m0.beam.cSeg.length, B = this.B;
+    for (const md of models) if (md.st.n !== N || md.st.m !== M || (md.contact ? md.st.K : 0) !== K || !sameInts(md.beam.cSeg, m0.beam.cSeg)) throw new Error('GpuSolver: all instances must share one topology, contact setting and anchors');
     this.sizes = { N, M, P, K, C };
+    this.cSeg = Int32Array.from(m0.beam.cSeg);                       // clamp-joint segments (topology of the kernels)
     Object.assign(this, opts.scales || GpuSolver.computeScales(models));
     // ---- layout
-    const L = { N, M, P, C, K, HN, NOUT };
-    L.NWG_P = Math.ceil((M + N) / WG); L.NWG_F = Math.ceil((P + C + K) / WG); L.NWG_N = Math.ceil(N / WG); L.NWG_S = Math.ceil(M / WG);
-    L.NWG = Math.max(1, L.NWG_P, L.NWG_F, L.NWG_N, L.NWG_S);
+    const L = { N, M, P, C, K, HN, HS, NOUT };
+    L.NWG_P = Math.ceil((M + N) / WG); L.NWG_F = Math.ceil((P + C + K) / WG); L.NWG_I = Math.ceil((N + M) / WG);
+    L.NWG = Math.max(1, L.NWG_P, L.NWG_F, L.NWG_I);
     const alloc = (obj, spec) => { let o = 0; const off = {}; for (const [k, n] of spec) { off[k] = o; o += Math.max(n, 0); } obj.size = Math.max(o, 4); return off; };
-    L.t = alloc(L.tS = {}, [['seg0', M], ['seg1', M], ['j0', P], ['j1', P], ['jn', P], ['cn', C], ['cb', C], ['cs', C], ['nsa', N], ['nsb', N], ['koff', 2 * K], ['knseg', 2 * K], ['ken', K]]);
+    L.t = alloc(L.tS = {}, [['seg0', M], ['seg1', M], ['j0', P], ['j1', P], ['cs', C], ['nsa', N], ['nsb', N], ['koff', 2 * K], ['knseg', 2 * K], ['ken', K], ['l0i', 2 * M]]);
     L.g = alloc(L.gS = {}, [['l0', M], ['jlen', P], ['clen', C], ['wk', 2 * K], ['hk', 2 * K], ['kw', K], ['kh', K],
-      ['stiff', B * M * 4], ['om', B * P * 3], ['mass', B * N], ['kseg', B * M], ['lc', B * N * 3], ['ll', B * N * 3], ['cei', B * C * 2], ['cdir', B * C * 3],
+      ['stiff', B * M * 5], ['om', B * P * 3], ['mass', B * N], ['krot', B * M * 3], ['lc', B * N * 3], ['ll', B * N * 3], ['cb', B * C * 3],
       ['fc90', B * K * 2], ['e90', B * K * 2], ['hs', B * K * 2]]);
-    L.i = alloc(L.iS = {}, [['x', B * N * 6], ['xp', B * N * 6], ['x0', B * N * 6], ['eref', B * M * 6], ['u', B * K * 4], ['slip', B * K * 2], ['fix', B * N], ['tfix', B * M], ['lock', B * K], ['kout', B * K], ['probe0', B * 6], ['q', B * M * 8], ['qp', B * M * 8]]);
-    L.f = alloc(L.fS = {}, [['v', B * N * 3], ['w', B * M], ['nprev', B * K * 3], ['lam', B * K], ['th0', B * K], ['rslip', B * K],
+    L.i = alloc(L.iS = {}, [['x', B * N * 6], ['xp', B * N * 6], ['x0', B * N * 6], ['u', B * K * 4], ['slip', B * K * 2], ['fix', B * N], ['lock', B * K], ['kout', B * K], ['probe0', B * 6],
+      ['q', B * M * 8], ['qp', B * M * 8], ['q0', B * M * 8], ['cq', B * C * 8]]);
+    L.f = alloc(L.fS = {}, [['v', B * N * 3], ['w', B * M * 3], ['nprev', B * K * 3], ['lam', B * K], ['th0', B * K], ['rslip', B * K],
       ['dent', B * K * 2], ['dente', B * K], ['climb', B * K * 2], ['tanpsi', B * K * 2], ['fn', B * K], ['ft', B * K], ['gap', B * K], ['phi', B * K * 2], ['theta', B * K],
-      ['anom', B * K], ['pres', B * K], ['util', B * K], ['mrot', B * K], ['mid', B * K * 3], ['nax', B * M], ['mj', B * P * 3], ['cm', B * C * 2], ['react', B * N * 3],
-      ['e', B * M * 3], ['lseg', B * M], ['r', B * M * 9], ['tn', B * N * 3], ['qn', B * N * 4], ['tpar', B * M], ['inert', B * M], ['eref', B * M * 3], ['c0', B * M],
-      ['penacc', B * K], ['hist', B * HN * 8], ['out', B * NOUT * 4]]);
+      ['anom', B * K], ['pres', B * K], ['util', B * K], ['mrot', B * K], ['mid', B * K * 3], ['nax', B * M], ['vsh', B * M * 2], ['mj', B * P * 3], ['cm', B * C * 2], ['react', B * N * 3],
+      ['lseg', B * M], ['r', B * M * 9], ['tn', B * N * 3], ['qn', B * N * 4],
+      ['penacc', B * K], ['hist', B * HN * HS], ['out', B * NOUT * 4]]);
     L.a = alloc(L.aS = {}, [['f', B * N * 6], ['t', B * M * 6], ['k', B * M * 2]]);
     this.L = L;
     // ---- buffers
@@ -84,7 +91,7 @@ export class GpuSolver {
     const mk = (words, label) => device.createBuffer({ size: Math.max(16, words * 4), usage: SU, label });
     this.bTopo = mk(L.tS.size, 'topo'); this.bGeo = mk(L.gS.size, 'geo'); this.bIp = mk(B * NIP, 'ip');
     this.bIst = mk(L.iS.size, 'ist'); this.bFst = mk(L.fS.size, 'fst'); this.bAcc = mk(L.aS.size, 'acc');
-    this.bPart = mk(B * 4 * L.NWG * 8, 'part'); this.bCtl = mk(B * NCT, 'ctl');
+    this.bPart = mk(B * 3 * L.NWG * 8, 'part'); this.bCtl = mk(B * NCT, 'ctl');
     this.geo = new Float32Array(L.gS.size); this.ipArr = new ArrayBuffer(B * NIP * 4);
     this._uploadTopo();
     // ---- pipelines (cached per device and source)
@@ -97,7 +104,7 @@ export class GpuSolver {
       const layout = device.createBindGroupLayout({ entries: ['read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'storage'].map((t, i) => ({ binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: t } })) });
       const pl = device.createPipelineLayout({ bindGroupLayouts: [layout] });
       const pipes = {};
-      for (const e of ['k_prep', 'k_force', 'k_seg', 'k_node', 'k_segint', 'k_ctrl']) pipes[e] = device.createComputePipeline({ layout: pl, compute: { module, entryPoint: e }, label: e });
+      for (const e of ['k_prep', 'k_force', 'k_int', 'k_ctrl']) pipes[e] = device.createComputePipeline({ layout: pl, compute: { module, entryPoint: e }, label: e });
       ent = { module, layout, pipes };
       cache.set(this.code, ent);
       if (cache.size > 8) cache.delete(cache.keys().next().value);
@@ -106,7 +113,8 @@ export class GpuSolver {
     this.bg = device.createBindGroup({ layout: ent.layout, entries: [this.bTopo, this.bGeo, this.bIp, this.bIst, this.bFst, this.bAcc, this.bPart, this.bCtl].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     this.ctlHost = new Array(B).fill(null);
     this.histRead = new Array(B).fill(0);
-    for (let b = 0; b < B; b++) this.upload(b);
+    for (let b = 0; b < B; b++) this.upload(b, false);
+    this.dev.queue.writeBuffer(this.bGeo, 0, this.geo);                // once for the batch (not B times)
   }
 
   /** compile-time check: resolves to the shader's compilation messages (errors abort the solver) */
@@ -114,13 +122,13 @@ export class GpuSolver {
 
   // ------------------------------------------------------------------------------------------- fixed-point scales
   /** fixed-point scales for a set of models of one topology: positions 2^-PB, forces 2^-FB, torques 2^-TB, contact
-   *  twist stiffness 2^-KB. A batch whose results must not depend on its composition (calibration: the same parameter
+   *  righting stiffness 2^-KB. A batch whose results must not depend on its composition (calibration: the same parameter
    *  vector gives the same objective in any batch) passes scales computed once, from the corners of the parameter box. */
   static computeScales(models) {
     const st = models[0].st;
     let R = 1e-6; for (const v of st.X) R = Math.max(R, Math.abs(v));
     const PB = clampi(59 - ceilLog2(R * 4), 16, 56);                 // positions: |X|·2^PB < 2^61
-    let EA = 0, EI = 0, GJ = 0, kp = 0, h = 0, w = 0, Lsum = 0, lmin = Infinity;
+    let EA = 0, EI = 0, GJ = 0, kp = 0, h = 0, w = 0, Lsum = 0, lmin = Infinity, lmax = 0;
     for (const md of models) {
       for (const v of md.stiff.EA) EA = Math.max(EA, v); for (const v of md.stiff.EIx) EI = Math.max(EI, v); for (const v of md.stiff.EIy) EI = Math.max(EI, v); for (const v of md.stiff.GJ) GJ = Math.max(GJ, v);
       kp = Math.max(kp, md.scene.contact.strength, md.scene.contact.stick_strength);
@@ -129,10 +137,12 @@ export class GpuSolver {
       if (md.protocol && md.protocol.mode === 1) { let f = 0; for (const v of md.protocol.sched) f = Math.max(f, Math.abs(v)); s += f; }
       Lsum = Math.max(Lsum, s);
     }
-    for (const v of st.l0) lmin = Math.min(lmin, v);
-    if (!Number.isFinite(lmin)) lmin = 1;
+    for (const v of st.l0) { lmin = Math.min(lmin, v); lmax = Math.max(lmax, v); }
+    if (!Number.isFinite(lmin)) { lmin = 1; lmax = 1; }
+    // forces: axial / shear up to 1 % strain, contact penalties, loads, bending; torques: joints and clamp joints
+    // (B·Ψ/l̄, B·Ψ/(l0/2)), the segment torque e × n and the contact levers
     const Fmax = Math.max(EA * 1e-2, kp * Math.max(h, w), Lsum * 10, 4 * EI / (lmin * lmin), 1e-6);
-    const Tmax = Math.max(EI / lmin, GJ / lmin, Fmax * Math.max(w, h, lmin), 1e-6);
+    const Tmax = Math.max(2 * EI / lmin, 2 * GJ / lmin, Fmax * Math.max(w, h, lmax), 1e-6);
     const Kmax = Math.max((Fmax + kp * h) * w / 0.03 * 10, kp * h * h, 1e-6);
     return {
       PB,
@@ -146,9 +156,9 @@ export class GpuSolver {
   _uploadTopo() {
     const { N, M, P, K, C } = this.sizes, L = this.L, md = this.models[0], st = md.st;
     const T = new Uint32Array(L.tS.size), t = L.t, NONE = 0xffffffff;
-    T.set(st.segI0, t.seg0); T.set(st.segI1, t.seg1); T.set(st.jSeg0, t.j0); T.set(st.jSeg1, t.j1); T.set(st.jNode, t.jn);
-    const cl = md.anchors.clamps;
-    cl.forEach((c, i) => { T[t.cn + i] = c[0]; T[t.cb + i] = c[1]; T[t.cs + i] = c[2]; });
+    T.set(st.segI0, t.seg0); T.set(st.segI1, t.seg1); T.set(st.jSeg0, t.j0); T.set(st.jSeg1, t.j1);
+    md.beam.cSeg.forEach((j, i) => { T[t.cs + i] = j; });
+    for (let j = 0; j < M; j++) { const [lo, hi] = toI64(st.l0[j], this.PB); T[t.l0i + 2 * j] = lo; T[t.l0i + 2 * j + 1] = hi; }   // the strain's rest length, exact
     T.fill(NONE, t.nsa, t.nsa + N); T.fill(NONE, t.nsb, t.nsb + N);
     for (let j = 0; j < M; j++) { T[t.nsa + st.segI0[j]] = j; T[t.nsb + st.segI1[j]] = j; }
     if (md.contact) {
@@ -170,25 +180,35 @@ export class GpuSolver {
   }
 
   // ------------------------------------------------------------------------------------------- host → device
-  /** copy instance b's model (state, stiffness, masses, loads, anchors, contact state, parameters) to the GPU */
-  upload(b) {
-    const md = this.models[b], st = md.st, { N, M, P, K, C } = this.sizes, L = this.L, G = this.geo, g = L.g, B = this.B;
-    // geo, per instance
-    for (let j = 0; j < M; j++) { const o = g.stiff + (b * M + j) * 4; G[o] = md.stiff.EA[j]; G[o + 1] = md.stiff.EIx[j]; G[o + 2] = md.stiff.EIy[j]; G[o + 3] = md.stiff.GJ[j]; }
+  /** copy instance b's model (state, stiffness, masses, loads, anchors, contact state, parameters) to the GPU
+   *  (writeGeo false: the caller writes the geometry buffer once for all instances) */
+  upload(b, writeGeo = true) {
+    const md = this.models[b], { K } = this.sizes, G = this.geo, g = this.L.g;
+    this._writeGoals(b);
+    if (md.contact) for (let i = 0; i < 2 * K; i++) { G[g.fc90 + b * K * 2 + i] = md.contact.fc90[i]; G[g.e90 + b * K * 2 + i] = md.contact.E90[i]; G[g.hs + b * K * 2 + i] = md.contact.Hs[i]; }
+    if (writeGeo) this.dev.queue.writeBuffer(this.bGeo, 0, G);
+    this._uploadParams(b);
+    this._uploadState(b);
+  }
+
+  /** the goal data of instance b that a rebuild changes: rod stiffness (EA EIx EIy GJ κGA), rest curvature, node
+   *  masses, static rotational stiffness, loads, clamp joints (per-axis stiffness, frozen frames), anchors, locks */
+  _writeGoals(b) {
+    const md = this.models[b], st = md.st, rod = md.beam, { N, M, P, K, C } = this.sizes, L = this.L, G = this.geo, g = L.g;
+    for (let j = 0; j < M; j++) { const o = g.stiff + (b * M + j) * 5; G[o] = rod.segEA[j]; G[o + 1] = rod.segEIx[j]; G[o + 2] = rod.segEIy[j]; G[o + 3] = rod.segGJ[j]; G[o + 4] = rod.segGA[j]; }
     for (let i = 0; i < 3 * P; i++) G[g.om + b * P * 3 + i] = st.Omega0[i];
     for (let i = 0; i < N; i++) G[g.mass + b * N + i] = md.mass[i];
-    for (let j = 0; j < M; j++) G[g.kseg + b * M + j] = md.kSegStatic[j];
+    for (let i = 0; i < 3 * M; i++) G[g.krot + b * M * 3 + i] = md.kRotStatic[i];
     for (let i = 0; i < 3 * N; i++) G[g.lc + b * N * 3 + i] = md.loads.const[i];
     G.fill(0, g.ll + b * N * 3, g.ll + (b + 1) * N * 3);
     for (const [nid, Fv] of md.loads.pointLocal) for (let c = 0; c < 3; c++) G[g.ll + (b * N + nid) * 3 + c] += Fv[c];
-    md.beam.cNode.forEach((_, c) => {
-      G[g.cei + (b * C + c) * 2] = md.beam.cEIx[c]; G[g.cei + (b * C + c) * 2 + 1] = md.beam.cEIy[c];
-      for (let k = 0; k < 3; k++) G[g.cdir + (b * C + c) * 3 + k] = md.beam.cDir[c][k];
-    });
-    if (md.contact) for (let i = 0; i < 2 * K; i++) { G[g.fc90 + b * K * 2 + i] = md.contact.fc90[i]; G[g.e90 + b * K * 2 + i] = md.contact.E90[i]; G[g.hs + b * K * 2 + i] = md.contact.Hs[i]; }
-    this.dev.queue.writeBuffer(this.bGeo, 0, G);
-    this._uploadParams(b);
-    this._uploadState(b);
+    for (let c = 0; c < C; c++) for (let k = 0; k < 3; k++) G[g.cb + (b * C + c) * 3 + k] = rod.cB[c][k];
+    if (C) this._wI(L.i.cq + b * C * 8, quatWords(rod.cQ));
+    const fx = new Uint32Array(N);
+    for (let n = 0; n < N; n++) { const a = md.anchors.nodeFree; let bits = (a[3 * n] ? 0 : 1) | (a[3 * n + 1] ? 0 : 2) | (a[3 * n + 2] ? 0 : 4); if (bits) bits |= 8; fx[n] = bits; }
+    if (md.protocol && md.protocol.mode === 2) fx[md.protocol.probe] = 15;
+    this._wI(L.i.fix + b * N, fx);
+    if (K && md.contact) this._wI(L.i.lock + b * K, Uint32Array.from(md.contact.locked));
   }
 
   _uploadParams(b) {
@@ -200,7 +220,7 @@ export class GpuSolver {
     u(8, cp.al_every | 0); f(9, cp.mu); f(10, cp.strength); f(11, cp.stick_strength);
     f(12, cp.torsion_factor); f(13, cp.epsilon); f(14, cp.slip_rate); u(15, cp.rot_friction ? 1 : 0);
     f(16, cp.rot_factor); u(17, cp.seat_law !== 'off' ? 1 : 0); u(18, cp.seat_gap ? 1 : 0); f(19, cp.dent_rate);
-    u(20, cp.dent_after_iter >= 0 ? cp.dent_after_iter : (md.contact ? md.contact.dentAfterDefault : 0)); f(21, cp.edge_threshold); f(22, this.jlenMin); u(23, 0);
+    u(20, cp.dent_after_iter >= 0 ? cp.dent_after_iter : (md.contact ? md.contact.dentAfterDefault : 0)); f(21, cp.edge_threshold); f(22, this.jlenMin); f(23, md.lRef);
     f(24, 2 ** (this.PB - 32)); f(25, 2 ** -this.PB); f(26, 2 ** (this.FB - 32)); f(27, 2 ** -this.FB);
     f(28, 2 ** (this.TB - 32)); f(29, 2 ** -this.TB); f(30, 2 ** (this.KB - 32)); f(31, 2 ** -this.KB);
     const pr = md.protocol || null;
@@ -212,32 +232,24 @@ export class GpuSolver {
   }
 
   _uploadState(b) {
-    const md = this.models[b], st = md.st, { N, M, P, K, C } = this.sizes, L = this.L, PB = this.PB;
+    const md = this.models[b], st = md.st, { N, M, K } = this.sizes, L = this.L, PB = this.PB;
     const i = L.i;
     const put64 = (arr, o, x, bits) => { const [lo, hi] = toI64(x, bits); arr[o] = lo; arr[o + 1] = hi; };
     const xw = new Uint32Array(N * 6), x0w = new Uint32Array(N * 6);
     for (let n = 0; n < N; n++) for (let c = 0; c < 3; c++) { put64(xw, n * 6 + 2 * c, st.X[3 * n + c], PB); put64(x0w, n * 6 + 2 * c, st.X0[3 * n + c], PB); }
     this._wI(i.x + b * N * 6, xw); this._wI(i.xp + b * N * 6, xw); this._wI(i.x0 + b * N * 6, x0w);
-    this._writeEref(b, xw);
+    const qw = quatWords(st.Q);
+    this._wI(i.q + b * M * 8, qw); this._wI(i.qp + b * M * 8, qw); this._wI(i.q0 + b * M * 8, quatWords(st.Q0));
     if (K) {
-      const uw = new Uint32Array(K * 4), sw = new Uint32Array(K * 2), lk = new Uint32Array(K);
+      const uw = new Uint32Array(K * 4), sw = new Uint32Array(K * 2);
       for (let k = 0; k < 2 * K; k++) { const uu = st.u[k], hi = Math.floor(uu); uw[2 * k] = Math.min(Math.round((uu - hi) * TWO32), TWO32 - 1) >>> 0; uw[2 * k + 1] = hi >>> 0; }
-      for (let k = 0; k < K; k++) { put64(sw, 2 * k, st.slip[k], PB); lk[k] = md.contact ? md.contact.locked[k] : 0; }
-      this._wI(i.u + b * K * 4, uw); this._wI(i.slip + b * K * 2, sw); this._wI(i.lock + b * K, lk);
+      for (let k = 0; k < K; k++) put64(sw, 2 * k, st.slip[k], PB);
+      this._wI(i.u + b * K * 4, uw); this._wI(i.slip + b * K * 2, sw);
     }
-    const fx = new Uint32Array(N), tf = new Uint32Array(M);
-    for (let n = 0; n < N; n++) { const a = md.anchors.nodeFree; let bits = (a[3 * n] ? 0 : 1) | (a[3 * n + 1] ? 0 : 2) | (a[3 * n + 2] ? 0 : 4); if (bits) bits |= 8; fx[n] = bits; }
-    for (let j = 0; j < M; j++) tf[j] = md.anchors.twistFree[j] ? 0 : 1;
-    if (md.protocol && md.protocol.mode === 2) fx[md.protocol.probe] = 15;
-    this._wI(i.fix + b * N, fx); this._wI(i.tfix + b * M, tf);
     if (md.protocol) { const p0 = new Uint32Array(6); for (let c = 0; c < 3; c++) put64(p0, 2 * c, st.X[3 * md.protocol.probe + c], PB); this._wI(i.probe0 + b * 6, p0); }
     // float state
     const f = L.f, F = (o, arr) => this.dev.queue.writeBuffer(this.bFst, o * 4, Float32Array.from(arr));
-    F(f.v + b * N * 3, st.V); F(f.w + b * M, st.Wt);
-    const qw = new Uint32Array(M * 8);
-    for (let k = 0; k < 4 * M; k++) put64(qw, 2 * k, st.Q[k], 60);
-    this._wI(i.q + b * M * 8, qw); this._wI(i.qp + b * M * 8, qw);
-    F(f.inert + b * M, md.inertia);
+    F(f.v + b * N * 3, st.V); F(f.w + b * M * 3, st.Wr);
     if (K && md.contact) {
       const c = md.contact;
       F(f.nprev + b * K * 3, st.nPrev); F(f.lam + b * K, st.lam); F(f.th0 + b * K, Array.from(c.theta0, v => (Number.isNaN(v) ? 1e30 : v)));
@@ -268,53 +280,17 @@ export class GpuSolver {
     this._wI(this.L.i.x + (b * this.sizes.N + pr.probe) * 6, w); this._wI(this.L.i.xp + (b * this.sizes.N + pr.probe) * 6, w);
   }
 
-  /** reference edge vectors for the compensated stretch: E = X[i1] − X[i0] (exact integers), its f32 copy and
-   *  c0 = |E|² − l0² in f64 — rebasing them on the current geometry keeps |δ| small, so ext stays exact to f32 */
-  _writeEref(b, xw) {
-    const md = this.models[b], st = md.st, { M } = this.sizes, L = this.L, PB = this.PB;
-    const ew = new Uint32Array(M * 6), e32 = new Float32Array(M * 3), c0 = new Float32Array(M);
-    for (let j = 0; j < M; j++) {
-      const a = st.segI0[j], c = st.segI1[j];
-      let s2 = 0;
-      for (let k = 0; k < 3; k++) {
-        const oa = a * 6 + 2 * k, oc = c * 6 + 2 * k;
-        let lo = xw[oc] - xw[oa], borrow = 0; if (lo < 0) { lo += TWO32; borrow = 1; }
-        const hi = (xw[oc + 1] - xw[oa + 1] - borrow) >>> 0;
-        ew[j * 6 + 2 * k] = lo >>> 0; ew[j * 6 + 2 * k + 1] = hi;
-        const v = fromI64(lo >>> 0, hi, PB);
-        e32[3 * j + k] = v; s2 += v * v;
-      }
-      c0[j] = s2 - st.l0[j] * st.l0[j];
-    }
-    this._wI(L.i.eref + b * M * 6, ew);
-    this.dev.queue.writeBuffer(this.bFst, (L.f.eref + b * M * 3) * 4, e32);
-    this.dev.queue.writeBuffer(this.bFst, (L.f.c0 + b * M) * 4, c0);
-  }
-
   /** after a scene edit: copy the instance's rebuilt model parameters (stiffness, masses, loads, anchors, rest state,
-   *  contact parameters) without touching the dynamic state on the GPU */
+   *  clamp joints, contact parameters) without touching the dynamic state on the GPU */
   updateParams(b) {
-    const md = this.models[b], { N, M, P, K, C } = this.sizes, L = this.L, G = this.geo, g = L.g;
-    for (let j = 0; j < M; j++) { const o = g.stiff + (b * M + j) * 4; G[o] = md.stiff.EA[j]; G[o + 1] = md.stiff.EIx[j]; G[o + 2] = md.stiff.EIy[j]; G[o + 3] = md.stiff.GJ[j]; }
-    for (let i = 0; i < 3 * P; i++) G[g.om + b * P * 3 + i] = md.st.Omega0[i];
-    for (let i = 0; i < N; i++) G[g.mass + b * N + i] = md.mass[i];
-    for (let j = 0; j < M; j++) G[g.kseg + b * M + j] = md.kSegStatic[j];
-    for (let i = 0; i < 3 * N; i++) G[g.lc + b * N * 3 + i] = md.loads.const[i];
-    G.fill(0, g.ll + b * N * 3, g.ll + (b + 1) * N * 3);
-    for (const [nid, Fv] of md.loads.pointLocal) for (let c = 0; c < 3; c++) G[g.ll + (b * N + nid) * 3 + c] += Fv[c];
-    if (md.anchors.clamps.length !== C) throw new Error('the anchors changed the number of clamps: rebuild the GPU solver');
-    md.beam.cNode.forEach((_, c) => { G[g.cei + (b * C + c) * 2] = md.beam.cEIx[c]; G[g.cei + (b * C + c) * 2 + 1] = md.beam.cEIy[c]; for (let k = 0; k < 3; k++) G[g.cdir + (b * C + c) * 3 + k] = md.beam.cDir[c][k]; });
-    this.dev.queue.writeBuffer(this.bGeo, 0, G);
-    const fx = new Uint32Array(N), tf = new Uint32Array(M);
-    for (let n = 0; n < N; n++) { const a = md.anchors.nodeFree; let bits = (a[3 * n] ? 0 : 1) | (a[3 * n + 1] ? 0 : 2) | (a[3 * n + 2] ? 0 : 4); if (bits) bits |= 8; fx[n] = bits; }
-    for (let j = 0; j < M; j++) tf[j] = md.anchors.twistFree[j] ? 0 : 1;
-    this._wI(L.i.fix + b * N, fx); this._wI(L.i.tfix + b * M, tf);
-    if (md.contact) this._wI(L.i.lock + b * K, Uint32Array.from(md.contact.locked));
+    const md = this.models[b];
+    if (!sameInts(md.beam.cSeg, this.cSeg)) throw new Error('the anchors changed the rotation clamps: rebuild the GPU solver');
+    this._writeGoals(b);
+    this.dev.queue.writeBuffer(this.bGeo, 0, this.geo);
     this._uploadParams(b);
     // a rebuild resets the kinetic-energy peak and the convergence flag (Solver.rebuild_goals)
     this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 4) * 4, new Float32Array([0]));
     this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 1) * 4, new Uint32Array([0]));
-    this.dev.queue.writeBuffer(this.bFst, (L.f.inert + b * M) * 4, Float32Array.from(md.inertia));
   }
 
   // ------------------------------------------------------------------------------------------- running
@@ -328,8 +304,8 @@ export class GpuSolver {
       dev.queue.writeBuffer(this.bCtl, (b * NCT + 12) * 4, w);
       if (opts.force !== false) dev.queue.writeBuffer(this.bCtl, (b * NCT + 1) * 4, new Uint32Array([0]));
     }
-    const L = this.L, { N, M, P, K, C } = this.sizes;
-    const groups = [['k_prep', L.NWG_P], ['k_force', L.NWG_F], ['k_seg', L.NWG_S], ['k_node', L.NWG_N], ['k_segint', L.NWG_S], ['k_ctrl', 1]];
+    const L = this.L;
+    const groups = [['k_prep', L.NWG_P], ['k_force', L.NWG_F], ['k_int', L.NWG_I], ['k_ctrl', 1]];
     let left = nIter;
     while (left > 0) {
       const k = Math.min(this.perSubmit, left); left -= k;
@@ -360,7 +336,8 @@ export class GpuSolver {
     for (let b = 0; b < this.B; b++) {
       const o = b * NCT * 4, U = (w) => dv.getUint32(o + 4 * w, true), F = (w) => dv.getFloat32(o + 4 * w, true);
       const c = { iter: U(0), done: U(1), rollback: U(2), alUpdate: U(3), kePrev: F(4), ke: F(5), resid: F(6) >= 1e38 ? Infinity : F(6), fref: F(7),
-        eStretch: F(8), eBend: F(9), eTors: F(10), eCont: F(11), stopAt: U(12), histN: U(13), phase: U(14), inc: U(15) };
+        eStretch: F(8), eBend: F(9), eTors: F(10), eCont: F(11), stopAt: U(12), histN: U(13), phase: U(14), inc: U(15),
+        eShear: F(18), resT: F(19), resF: F(32) };
       this.ctlHost[b] = c; out.push(c);
     }
     return out;
@@ -371,13 +348,15 @@ export class GpuSolver {
     const c = this.ctlHost[b], done = c.histN, from = this.histRead[b];
     const n = Math.min(done - from, HN);
     if (n <= 0) return 0;
-    const buf = new Float32Array(await this._read(this.bFst, this.L.f.hist + b * HN * 8, HN * 8));
+    const buf = new Float32Array(await this._read(this.bFst, this.L.f.hist + b * HN * HS, HN * HS));
     const H = this.models[b].st.history;
+    if (!H.shear) H.shear = [];
     for (let k = done - n; k < done; k++) {
       // entry of iteration it (1-based) sits at (it − 1) % HN; the k-th recorded entry here is iteration c.iter − (done − 1 − k)
-      const it = c.iter - (done - 1 - k), o = ((it - 1) % HN) * 8;
-      H.kinetic.push(buf[o]); H.strain.push(buf[o + 1]); H.bending.push(buf[o + 2]); H.torsion.push(buf[o + 3]); H.stretch.push(buf[o + 4]); H.contact.push(buf[o + 5]);
-      H.residual.push(buf[o + 6] >= 1e38 ? Infinity : buf[o + 6]);
+      const it = c.iter - (done - 1 - k), o = ((it - 1) % HN) * HS;
+      H.kinetic.push(buf[o]); H.strain.push(buf[o + 1]); H.bending.push(buf[o + 2]); H.torsion.push(buf[o + 3]); H.stretch.push(buf[o + 4]);
+      H.shear.push(buf[o + 5]); H.contact.push(buf[o + 6]);
+      H.residual.push(buf[o + 7] >= 1e38 ? Infinity : buf[o + 7]);
     }
     this.histRead[b] = done;
     return n;
@@ -403,27 +382,33 @@ export class GpuSolver {
     return out;
   }
 
-  /** copy the GPU state of instance b into its CpuSolver model (positions, frames, contacts, outputs, energies) */
-  async download(b, { rebase = true, bufs = null, history = true } = {}) {
+  /** copy the GPU state of instance b into its CpuSolver model: positions and frames (with their reference X0 / Q0),
+   *  velocities, section forces and moments, energies, reactions, contact state, history, iteration, residual (and
+   *  its parts), kinetic-energy peak, the frame inertia of the last iteration — the model is then in the state a CPU
+   *  run would leave (results(), rebuildGoals(), the stability check and further CPU steps work on it) */
+  async download(b, { bufs = null, history = true } = {}) {
     const md = this.models[b], st = md.st, { N, M, P, K, C } = this.sizes, L = this.L, PB = this.PB;
     const c = (bufs && this.ctlHost[b]) || (await this.readControl())[b];
-    const rb = c.rollback === 1;
+    const rb = c.rollback === 1;                                   // a pending roll-back: the state is the previous one
     const iBuf = bufs ? bufs.iBuf : new Uint32Array(await this._read(this.bIst, 0, L.iS.size));
     const fBuf = bufs ? bufs.fBuf : new Float32Array(await this._read(this.bFst, 0, L.fS.size));
     const xo = (rb ? L.i.xp : L.i.x) + b * N * 6;
     for (let n = 0; n < N; n++) for (let k = 0; k < 3; k++) { const o = xo + n * 6 + 2 * k; st.X[3 * n + k] = fromI64(iBuf[o], iBuf[o + 1], PB); }
     const x0o = L.i.x0 + b * N * 6;
     for (let n = 0; n < N; n++) for (let k = 0; k < 3; k++) { const o = x0o + n * 6 + 2 * k; st.X0[3 * n + k] = fromI64(iBuf[o], iBuf[o + 1], PB); }
-    const qo = (rb ? L.i.qp : L.i.q) + b * M * 8;
-    for (let i = 0; i < 4 * M; i++) st.Q[i] = fromI64(iBuf[qo + 2 * i], iBuf[qo + 2 * i + 1], 60);
-    if (rb) { st.V.fill(0); st.Wt.fill(0); }
-    else { for (let i = 0; i < 3 * N; i++) st.V[i] = fBuf[L.f.v + b * N * 3 + i]; for (let j = 0; j < M; j++) st.Wt[j] = fBuf[L.f.w + b * M + j]; }
-    for (let j = 0; j < M; j++) md.beam.N[j] = fBuf[L.f.nax + b * M + j];
-    for (let i = 0; i < 3 * P; i++) md.beam.M[i] = fBuf[L.f.mj + b * P * 3 + i];
-    for (let i = 0; i < 2 * C; i++) md.beam.cM[i] = fBuf[L.f.cm + b * C * 2 + i];
+    const qo = (rb ? L.i.qp : L.i.q) + b * M * 8, q0o = L.i.q0 + b * M * 8;
+    for (let i = 0; i < 4 * M; i++) { st.Q[i] = fromI64(iBuf[qo + 2 * i], iBuf[qo + 2 * i + 1], 60); st.Q0[i] = fromI64(iBuf[q0o + 2 * i], iBuf[q0o + 2 * i + 1], 60); }
+    if (rb) { st.V.fill(0); st.Wr.fill(0); }
+    else { for (let i = 0; i < 3 * N; i++) st.V[i] = fBuf[L.f.v + b * N * 3 + i]; for (let i = 0; i < 3 * M; i++) st.Wr[i] = fBuf[L.f.w + b * M * 3 + i]; }
+    const rod = md.beam;
+    for (let j = 0; j < M; j++) rod.N[j] = fBuf[L.f.nax + b * M + j];
+    for (let i = 0; i < 2 * M; i++) rod.V[i] = fBuf[L.f.vsh + b * M * 2 + i];
+    for (let i = 0; i < 3 * P; i++) rod.M[i] = fBuf[L.f.mj + b * P * 3 + i];
+    for (let i = 0; i < 2 * C; i++) rod.cM[i] = fBuf[L.f.cm + b * C * 2 + i];
     for (let i = 0; i < 3 * N; i++) md.anchors.reactions[i] = fBuf[L.f.react + b * N * 3 + i];
-    md.beam.energyParts = { bending: c.eBend, torsion: c.eTors, stretch: c.eStretch };
-    md.beam.energy = c.eBend + c.eTors + c.eStretch;
+    rod.energyParts = { bending: c.eBend, torsion: c.eTors, stretch: c.eStretch, shear: c.eShear };
+    rod.energy = c.eStretch + c.eShear + c.eBend + c.eTors;
+    md.residualParts = { force: c.resF, torque: c.resT };
     if (K && md.contact) {
       const ct = md.contact;
       for (let k = 0; k < 2 * K; k++) { const o = L.i.u + b * K * 4 + 2 * k; st.u[k] = iBuf[o + 1] >= 0x80000000 ? 0 : iBuf[o + 1] + iBuf[o] / TWO32; }
@@ -449,29 +434,33 @@ export class GpuSolver {
       ct.energy = c.eCont;
       const rampN = Math.max(md.scene.contact.ramp_iter | 0, 0), alN = Math.max(md.scene.contact.al_every | 0, 1);
       ct.penN = c.alUpdate ? 0 : (c.iter > rampN ? (c.iter - rampN) % alN : 0);
+      // the ramp of the last iteration and the frame inertia it used (CpuSolver.step: static + contact righting share)
+      const last = Math.max(c.iter - 1, 0);
+      ct.ramp = rampN === 0 ? 1.0 : Math.min(1.0, 0.01 + 0.99 * last / rampN);
+      const kTw = new Float64Array(M); ct.addTwistStiffness(st, kTw);
+      const ms = md.scene.solver.mass_scale;
+      for (let j = 0; j < M; j++) for (let k = 0; k < 3; k++) md.inertia3[3 * j + k] = ms * Math.max(md.kRotStatic[3 * j + k] + kTw[j], 1e-12);
     }
     st.iteration = c.iter; st.residual = c.resid; md.kePrev = c.kePrev;
     md.converged = c.done === 1 && c.resid <= md.scene.solver.tol;
     if (history) await this.readHistory(b);
     else this.histRead[b] = c.histN;
-    if (rebase) {                                                  // keep the stretch reference close to the geometry
-      const xw = new Uint32Array(N * 6); xw.set(iBuf.subarray(xo, xo + N * 6));
-      this._writeEref(b, xw);
-    }
     return md;
   }
 
-  /** current geometry becomes the displacement origin; slip counters restart (on the GPU). WebGPU rejects a copy within
-   *  one buffer (the whole command buffer is dropped), so x goes to x0 through a scratch buffer. */
+  /** current geometry becomes the displacement origin (X0 = X, Q0 = Q); slip counters restart (on the GPU). WebGPU
+   *  rejects a copy within one buffer (the whole command buffer is dropped), so x, q go to x0, q0 through a scratch buffer. */
   internalize(b) {
-    const { N, K } = this.sizes, L = this.L, rb = this.ctlHost[b] && this.ctlHost[b].rollback === 1, bytes = N * 24;
-    if (!this.bTmp || this.bTmp.size < bytes) {
+    const { N, M, K } = this.sizes, L = this.L, rb = this.ctlHost[b] && this.ctlHost[b].rollback === 1, bx = N * 24, bq = M * 32;
+    if (!this.bTmp || this.bTmp.size < bx + bq) {
       try { this.bTmp?.destroy(); } catch (e) { /* ignore */ }
-      this.bTmp = this.dev.createBuffer({ label: 'tmp', size: Math.max(16, bytes), usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.bTmp = this.dev.createBuffer({ label: 'tmp', size: Math.max(16, bx + bq), usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     const enc = this.dev.createCommandEncoder();
-    enc.copyBufferToBuffer(this.bIst, ((rb ? L.i.xp : L.i.x) + b * N * 6) * 4, this.bTmp, 0, bytes);
-    enc.copyBufferToBuffer(this.bTmp, 0, this.bIst, (L.i.x0 + b * N * 6) * 4, bytes);
+    enc.copyBufferToBuffer(this.bIst, ((rb ? L.i.xp : L.i.x) + b * N * 6) * 4, this.bTmp, 0, bx);
+    enc.copyBufferToBuffer(this.bIst, ((rb ? L.i.qp : L.i.q) + b * M * 8) * 4, this.bTmp, bx, bq);
+    enc.copyBufferToBuffer(this.bTmp, 0, this.bIst, (L.i.x0 + b * N * 6) * 4, bx);
+    enc.copyBufferToBuffer(this.bTmp, bx, this.bIst, (L.i.q0 + b * M * 8) * 4, bq);
     if (K) enc.clearBuffer(this.bIst, (L.i.slip + b * K * 2) * 4, K * 8);
     this.dev.queue.submit([enc.finish()]);
   }

@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU frame diagnosis</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// Where do the CPU and GPU frames differ? At each checkpoint the segments with the largest frame difference, the
+// difference split into body axes (Δ = log(q_cpu* ⊗ q_gpu): x, y bending/shear, z roll), the segment's role (crossing
+// segment of a contact, strand end, index along the strand), its body angular velocity and torque inertia.
+//   ?case=v5dome_cm &cps=500,700,1000 &top=12
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+import { relRotation } from '../js/rod_cosserat.js';
+const q = new URLSearchParams(location.search);
+const name = q.get('case') || 'v5dome_cm', cps = (q.get('cps') || '500,700,1000').split(',').map(Number), top = +(q.get('top') || 12);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const e = (v, d = 2) => (Number.isFinite(v) ? v.toExponential(d) : String(v));
+(async () => {
+  const dev = await getDevice();
+  const { sc, topo, contacts } = await caseByName(name);
+  const cpu = new CpuSolver(sc, topo, { contacts }), model = new CpuSolver(sc, topo, { contacts });
+  const gpu = new GpuSolver(dev, [model], { perSubmit: 50 });
+  const st = cpu.st;
+  let done = 0;
+  for (const cp of cps) {
+    while (cpu.st.iteration < cp && !cpu.converged) cpu.step(1);
+    if (cp > done) { await gpu.step(cp - done, { force: false }); done = cp; }
+    await gpu.download(0);
+    const a = cpu.st, b = model.st, QQ = new Float64Array(8), d = new Float64Array(3);
+    // crossing segments of the CPU contact evaluation (both sides)
+    const role = new Map();
+    if (cpu.contact) for (let c = 0; c < st.K; c++) for (let side = 0; side < 2; side++) { const s = cpu.contact.ev[side].seg[c]; role.set(s, (role.get(s) || '') + `k${c}${side ? 'B' : 'A'} `); }
+    const rows = [];
+    for (let j = 0; j < st.m; j++) {
+      QQ.set(a.Q.subarray(4 * j, 4 * j + 4), 0); QQ.set(b.Q.subarray(4 * j, 4 * j + 4), 4);
+      relRotation(QQ, 0, 1, d);
+      const s = st.segStrand[j], i0 = st.segOffset[s], i1 = st.segOffset[s + 1];
+      rows.push({ j, ang: Math.hypot(d[0], d[1], d[2]), d: Array.from(d), s, k: j - i0, n: i1 - i0, role: role.get(j) || '', W: [a.Wr[3 * j], a.Wr[3 * j + 1], a.Wr[3 * j + 2]], Wg: [b.Wr[3 * j], b.Wr[3 * j + 1], b.Wr[3 * j + 2]], I: [cpu.inertia3[3 * j], cpu.inertia3[3 * j + 1], cpu.inertia3[3 * j + 2]] });
+    }
+    rows.sort((x, y) => y.ang - x.ang);
+    let sum = 0; for (const r of rows) sum += r.ang;
+    log(`\nit ${a.iteration}/${b.iteration}: largest frame differences (mean over segments ${e(sum / rows.length)} rad)`);
+    for (const r of rows.slice(0, top)) log(`  seg ${String(r.j).padStart(4)} strand ${String(r.s).padStart(3)} #${String(r.k).padStart(3)}/${r.n}  Δ ${e(r.ang)}  body (${r.d.map(v => e(v, 1)).join(', ')})  ${r.role.padEnd(10)} ω cpu (${r.W.map(v => e(v, 1)).join(', ')}) gpu (${r.Wg.map(v => e(v, 1)).join(', ')})  I (${r.I.map(v => e(v, 1)).join(', ')})`);
+  }
+  window.__done = true;
+})();
+</script></body></html>

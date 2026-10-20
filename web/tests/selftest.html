@@ -17,7 +17,7 @@ below into the chat when something looks off.</p>
 <pre id="out">press Run</pre>
 </div>
 <script type="module">
-import { CpuSolver } from '../js/solver_cpu.js';
+import { CpuSolver, deepClone } from '../js/solver_cpu.js';
 import { GpuSolver, getDevice } from '../js/solver_gpu.js';
 import { caseByName } from './browser_cases.js';
 const out = document.getElementById('out'), lines = [];
@@ -36,9 +36,11 @@ async function main() {
   log(`limits: maxStorageBufferBindingSize ${(dev.limits.maxStorageBufferBindingSize / 2 ** 20).toFixed(0)} MiB · maxComputeWorkgroupsPerDimension ${dev.limits.maxComputeWorkgroupsPerDimension}`);
   log('\n1 · precision: GPU (f32 + 64-bit fixed point) against the CPU f64 reference');
   const cases = quick ? ['cantilever', 'cross_stick', 'cross_slip', 'v5dome_cm'] : ['cantilever', 'cantilever_edge', 'torsion', 'cross_stick', 'cross_slip', 'cross_locked', 'cross_w23', 'v5dome_cm'];
-  // converging cases run to the tolerance; the slipping crossing never converges by design (the pull exceeds μ·Fn):
-  // it is compared after 1200 iterations, before the stick–slip dynamics separate f64 runs of any kind
-  const N = { cantilever: 12000, cantilever_edge: 6000, torsion: 3000, cross_stick: 8000, cross_slip: 1200, cross_locked: 4000, cross_w23: 6000, v5dome_cm: 1500 };
+  // converging cases run to the tolerance; the slipping crossing never converges by design (the pull exceeds μ·Fn): it
+  // is compared at 340 iterations, before the first slip — from there stick–slip switching separates any two runs at
+  // f32-level differences (a CPU run with f32-sized noise separates the same way); the dome is compared at 1000
+  // iterations, before the kinetic-damping event near 1100 that f32-sized noise in the roll of the frames flips
+  const N = { cantilever: 12000, cantilever_edge: 6000, torsion: 3000, cross_stick: 8000, cross_slip: 340, cross_locked: 4000, cross_w23: 6000, v5dome_cm: 1000 };
   for (const name of cases) {
     try {
       const { sc, topo, contacts } = await caseByName(name, BASE);
@@ -52,18 +54,23 @@ async function main() {
       // moments: the largest difference over Mx, My, T against the largest moment (a single component can be ~0)
       let dM = 0, Mmax = 0; for (const k of ['Mx', 'My', 'T']) for (let j = 0; j < rc.segment[k].length; j++) { dM = Math.max(dM, Math.abs(rg.segment[k][j] - rc.segment[k][j])); Mmax = Math.max(Mmax, Math.abs(rc.segment[k][j])); }
       let s = `${name.padEnd(14)} it ${String(st.iteration).padStart(5)}/${String(sg.iteration).padStart(5)}  residual ${st.residual.toExponential(2)}/${sg.residual.toExponential(2)}  |ΔX|/|u| ${(dX / Math.max(disp, 1e-9 * size, 1e-30)).toExponential(1)}  |ΔM|/|M| ${(dM / Math.max(Mmax, 1e-30)).toExponential(1)}`;
-      if (contacts && cpu.contact && st.K === 1) s += `  Fn ${cpu.contact.Fn[0].toFixed(4)}/${model.contact.Fn[0].toFixed(4)}  slip ${st.slip[0].toFixed(4)}/${sg.slip[0].toFixed(4)}${name === 'cross_slip' ? ' (slipping, 1200 it)' : ''}`;
+      if (contacts && cpu.contact && st.K === 1) s += `  Fn ${cpu.contact.Fn[0].toFixed(4)}/${model.contact.Fn[0].toFixed(4)}  slip ${st.slip[0].toFixed(4)}/${sg.slip[0].toFixed(4)}${name === 'cross_slip' ? ' (before the first slip, 340 it)' : ''}`;
       s += `  (${tc.toFixed(0)} ms cpu · ${tg.toFixed(0)} ms gpu)`;
       log(s); gpu.dispose();
     } catch (e) { log(`${name}: ERROR ${e.message}`); }
   }
-  log('\n2 · reproducibility: the same model twice on the GPU');
+  log('\n2 · reproducibility: the same model twice on the GPU, and as instance 1 of a batch of 2');
   try {
     const { sc, topo } = await caseByName('v5dome_cm', BASE);
-    const runs = [];
-    for (let r = 0; r < 2; r++) { const m = new CpuSolver(sc, topo); const g = new GpuSolver(dev, [m]); await runGpu(g, 800); await g.download(0); runs.push(Float64Array.from(m.st.X)); g.dispose(); }
-    let same = true; for (let i = 0; i < runs[0].length; i++) if (runs[0][i] !== runs[1][i]) { same = false; break; }
-    log(same ? 'v5dome_cm 800 iterations: bit-identical positions' : 'v5dome_cm: runs DIFFER (unexpected — please report)');
+    // positions, frames, body angular velocities, velocities, contact state and the energy history, bit for bit
+    const snap = (m) => [m.st.X, m.st.Q, m.st.Wr, m.st.V, m.st.u, m.st.slip, m.contact.Fn, m.st.history.kinetic, m.st.history.strain].map(a => Float64Array.from(a));
+    const same = (a, b) => a.every((x, k) => x.length === b[k].length && x.every((v, i) => Object.is(v, b[k][i])));
+    const runs = []; let scales = null;
+    for (let r = 0; r < 2; r++) { const m = new CpuSolver(sc, topo); const g = new GpuSolver(dev, [m], scales ? { scales } : {}); scales = g.scales; await runGpu(g, 800); await g.download(0); runs.push(snap(m)); g.dispose(); }
+    const sc2 = deepClone(sc); sc2.contact.mu = 0.5;
+    const other = new CpuSolver(sc2, topo), m = new CpuSolver(sc, topo);
+    const g = new GpuSolver(dev, [other, m], { scales }); await runGpu(g, 800); await g.download(1); runs.push(snap(m)); g.dispose();
+    log(`v5dome_cm 800 iterations: run 1 vs run 2 ${same(runs[0], runs[1]) ? 'bit-identical' : 'DIFFER (unexpected — please report)'}; as instance 1 of a batch ${same(runs[0], runs[2]) ? 'bit-identical' : 'DIFFERS (unexpected — please report)'} (X, Q, ω, v, u, slip, Fn, energy history)`);
   } catch (e) { log('reproducibility: ERROR ' + e.message); }
   log('\n3 · throughput: instances of one model in the same dispatches (calibration batches)');
   for (const name of quick ? ['v5dome_cm'] : ['v5dome_cm', 'dualv5dome_cm']) {
@@ -87,5 +94,6 @@ async function main() {
 }
 document.getElementById('go').onclick = () => { document.getElementById('go').disabled = true; main().finally(() => { document.getElementById('go').disabled = false; window.__done = true; }); };
 document.getElementById('copy').onclick = () => navigator.clipboard?.writeText(lines.join('\n'));
+if (new URLSearchParams(location.search).has('quick')) document.getElementById('quick').checked = true;
 if (new URLSearchParams(location.search).has('auto')) document.getElementById('go').click();
 </script></body></html>

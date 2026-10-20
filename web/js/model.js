@@ -66,11 +66,11 @@ export function buildState(topo) {
   return {
     S, n, m, p, K, X, V: new Float64Array(3 * n), X0: X.slice(), nodeOffset, nodeStrand,
     segI0: Int32Array.from(i0), segI1: Int32Array.from(i1), segStrand: Int32Array.from(segStrand), segOffset,
-    Q: Float64Array.from(Q), Wt: new Float64Array(m), l0: L0,
+    Q: Float64Array.from(Q), Q0: Float64Array.from(Q), Wr: new Float64Array(3 * m), l0: L0,
     jSeg0, jSeg1, jNode: Int32Array.from(jn), jLen, Omega0: new Float64Array(3 * p),
     knotEdges, u, nPrev, slip: new Float64Array(K), stuck: new Uint8Array(K).fill(1), lam: new Float64Array(K),
     nodeFrameIds, iteration: 0, residual: Infinity,
-    history: { kinetic: [], strain: [], bending: [], torsion: [], stretch: [], contact: [], residual: [] },
+    history: { kinetic: [], strain: [], bending: [], torsion: [], stretch: [], shear: [], contact: [], residual: [] },
   };
 }
 
@@ -163,9 +163,8 @@ export class Anchors {
   constructor(scene, topo, st) {
     const n = st.n, m = st.m;
     this.nodeFree = new Uint8Array(3 * n).fill(1);
-    this.twistFree = new Uint8Array(m).fill(1);
+    this.rotClamps = [];                                     // rotation anchors: [node, segment, [rX, rY, rZ]] per adjacent segment
     this.fixedNodes = [];
-    this.clamps = [];                                        // [node, neighbour, segment, [unit dir node → neighbour]]
     const adj = new Map();
     for (let j = 0; j < m; j++) {
       const a = st.segI0[j], b = st.segI1[j];
@@ -177,14 +176,7 @@ export class Anchors {
       if (nid === undefined) continue;
       for (let c = 0; c < 3; c++) if (mask[c]) this.nodeFree[3 * nid + c] = 0;
       if ((mask[0] || mask[1] || mask[2]) && !this.fixedNodes.includes(nid)) this.fixedNodes.push(nid);
-      for (const [j, nb] of adj.get(nid) || []) {
-        if (mask[5]) this.twistFree[j] = 0;
-        if (mask[3] || mask[4]) {
-          const t = [st.X[3 * nb] - st.X[3 * nid], st.X[3 * nb + 1] - st.X[3 * nid + 1], st.X[3 * nb + 2] - st.X[3 * nid + 2]];
-          const l = Math.max(Math.sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]), 1e-12);
-          this.clamps.push([nid, nb, j, [t[0] / l, t[1] / l, t[2] / l]]);
-        }
-      }
+      for (const [j] of adj.get(nid) || []) if (mask[3] || mask[4] || mask[5]) this.rotClamps.push([nid, j, [!!mask[3], !!mask[4], !!mask[5]]]);
     }
     this.reactions = new Float64Array(3 * n);
     this.fixedAny = new Uint8Array(n);
@@ -239,12 +231,12 @@ export function strandStiffness(scene, st) {
   for (let s = 0; s < st.S; s++) {
     const g = scene.strandGroup(s), grp = scene.group(g);
     const k = sectionStiffness(grp.section, grp.material), f = beamFactors(grp.beam);
-    per.push({ EA: k.EA * f.EA, EIx: k.EIx * f.EIx, EIy: k.EIy * f.EIy, GJ: k.GJ * f.GJ });
+    per.push({ EA: k.EA * f.EA, EIx: k.EIx * f.EIx, EIy: k.EIy * f.EIy, GJ: k.GJ * f.GJ, GA: k.GA * (f.GA ?? 1.0) });
     acts.push(g === 1 ? beamActivations(scene.beam) : beamActivations(grp.beam));
   }
-  const EA = new Float64Array(st.m), EIx = new Float64Array(st.m), EIy = new Float64Array(st.m), GJ = new Float64Array(st.m);
-  for (let j = 0; j < st.m; j++) { const q = per[st.segStrand[j]]; EA[j] = q.EA; EIx[j] = q.EIx; EIy[j] = q.EIy; GJ[j] = q.GJ; }
+  const EA = new Float64Array(st.m), EIx = new Float64Array(st.m), EIy = new Float64Array(st.m), GJ = new Float64Array(st.m), GA = new Float64Array(st.m);
+  for (let j = 0; j < st.m; j++) { const q = per[st.segStrand[j]]; EA[j] = q.EA; EIx[j] = q.EIx; EIy[j] = q.EIy; GJ[j] = q.GJ; GA[j] = q.GA; }
   const act = new Float64Array(3 * st.p);
   for (let j = 0; j < st.p; j++) act.set(acts[st.segStrand[st.jSeg0[j]]], 3 * j);
-  return { stiff: { EA, EIx, EIy, GJ }, act };
+  return { stiff: { EA, EIx, EIy, GJ, GA }, act };
 }

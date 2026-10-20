@@ -48,7 +48,7 @@ async function gpuReplay(dev, relaxed, job, t, cs, scales) {
       const g = new GpuSolver(dev, [md], { scales });
       let done = 0, first = true;
       while (done < rp.relax_iter) { const k = Math.min(500, rp.relax_iter - done); const ctl = await g.step(k, { force: first }); first = false; done += k; if (ctl[0].done) break; }
-      await g.downloadAll(null, { history: false, rebase: false }); g.dispose();
+      await g.downloadAll(null, { history: false }); g.dispose();
       md.internalize();
       let dx = 0; for (let i = 0; i < md.st.X.length; i++) dx = Math.max(dx, Math.abs(md.st.X[i] - sv.st.X[i]));
       let du = 0; for (let i = 0; i < md.st.u.length; i++) du = Math.max(du, Math.abs(md.st.u[i] - sv.st.u[i]));

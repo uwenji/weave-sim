@@ -372,7 +372,7 @@ export class CalibrationSet {
   /** a batch of parameter vectors → [{name: result}] (GPU: one batched run; CPU: one after the other) */
   async simulateBatch(valuesList, tests = null, opts = {}) {
     tests = tests || this.tests;
-    if (this.backend === 'gpu' && this.device) {
+    if (this.backend === 'gpu' && this.device) {                                             // batched WebGPU path
       const out = [], T = Math.max(tests.length, 1) * Math.max(this.replay.replicas | 0, 1), per = Math.max(1, Math.floor(this.maxInstances / T));
       for (let i = 0; i < valuesList.length; i += per) out.push(...(await this._simulateGPU(valuesList.slice(i, i + per), tests, { ...opts, offset: i, count: valuesList.length })));
       return out;
@@ -461,7 +461,7 @@ export class CalibrationSet {
         if (prog) prog({ stage: 'relax', candidate: opts.offset || 0, batch: valuesList.length, count: opts.count || valuesList.length, frac: done / relaxIter });
         if (ctl.every(c => c.done === 1)) break;
       }
-      await g.downloadAll(null, { history: false, rebase: false });
+      await g.downloadAll(null, { history: false });
     } finally { g.dispose(); }
     for (const md of models) { md.internalize(); if (rp.lock) md.lockContacts(); }
     // 2 · replay: one instance per (parameter vector, test), all in the same dispatches

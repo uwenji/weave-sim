@@ -1,9 +1,10 @@
-// WeaveSim Web — the app: scene and model management, the panels, the solve loop (batched WebGPU solver or the CPU
-// f64 reference), selection / picking (frames, and whole laths for the lath groups), the UTM replay, the Rhino export,
-// the calibration panel (calib_ui.js), the discretisation (disc_ui.js), the fastened-structure protocol under Run
-// (protocol_ui.js: Zero → settle → Lock) and the Display sidebar (display_ui.js: colours, legend, diagrams, joints). Mirrors the Python viewer (weavesim/app): File · Weave · Units & material · Contact ·
-// Loads · Anchors · Solve · Discretisation · UTM · Calibration on the left, the solve / discretisation strip pinned on
-// top as in LocalSH, results and display on the sidebar.
+// WeaveSim Web — the app: scene and model management, the Setup sections (File · Weave · Units & material · Contact ·
+// Loads · Anchors · Solve · Discretisation · UTM · Calibration), the solve loop (batched WebGPU solver or the CPU f64
+// reference), selection / picking (frames, and whole laths for the lath groups), the UTM replay, the Rhino export.
+// Elsewhere: the Monitor (monitor_ui.js: run bar, solver / stability / probe charts; knot_ui.js: the followed
+// crossings; disc_ui.js: the joint placement), the load-test protocol in the run bar (protocol_ui.js: Zero → settle),
+// the Display sidebar (display_ui.js: colours, legend, diagrams, joints), the calibration (calib_ui.js) and the info
+// icons (info.js).
 import { Scene, selectorLabel, fixLabel } from './scene.js';
 import { Mesh } from './mesh.js';
 import { buildTopology, fkey, fsplit, overFrame, underFrame } from './topology.js';
@@ -13,7 +14,6 @@ import { GpuSolver, getDevice } from './solver_gpu.js';
 import { resolveSelector, anchorMasks, nodeQuats } from './model.js';
 import { toFrame } from './quat.js';
 import { View } from './view.js';
-import { drawPlot } from './plot.js';
 import { initDisplay, LAYER_LABEL, SEG_LAYERS, KNOT_LAYERS } from './display_ui.js';
 import { initDiscretize } from './disc_ui.js';
 import { initProtocol } from './protocol_ui.js';
@@ -23,6 +23,11 @@ import { parseUTMCsv } from './utm.js';
 import { sectionStiffness, IxEff, IyEff, JEff, sectionArea, beamFactors, beamActivations } from './params.js';
 import { CalibrationSet, Test, Probe, replaySettings, REPLAY_DEFAULTS } from './calibrate.js';
 import { initCalibration } from './calib_ui.js';
+import { KnotHistory } from './knot_history.js';
+import { initKnots } from './knot_ui.js';
+import { initMonitor } from './monitor_ui.js';
+import { initInfo } from './info.js';
+import { stability } from './stability.js';
 
 const $ = (id) => document.getElementById(id);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -51,10 +56,12 @@ export const A = {
   model: null, gpu: null, device: null, gpuAvailable: false, backend: 'cpu',
   running: false, busy: false, runFirst: false, runUntil: 0, gpuChunk: 64, lastSync: 0, elapsed: 0,
   results: null, baseline: null, goalSig: '', paramSig: '',
-  selection: [], lathSel: new Set(), mode: 'none', stripTab: 'solve',
+  selection: [], lathSel: new Set(), mode: 'none',
   utm: null, utmText: null, utmName: '', probeTrace: [], replay: null,
-  view: null, dirty: { results: false },
+  view: null, dirty: { results: false }, chartFull: false,
 };
+const khist = new KnotHistory();                                  // the values the Monitor's knot charts plot
+A.knotHist = khist;
 let view;
 if (typeof window !== 'undefined') window.weavesim = A;          // console access: weavesim.model, weavesim.scene, …
 
@@ -106,20 +113,25 @@ function resetModel(opts = {}) {
   disposeGpu();
   if (!A.topo) return;
   A.model = new CpuSolver(A.scene, A.topo);
+  khist.bind(A.model, A.topo, A.scene); recordKnots(true);
   A.goalSig = goalSignature(); A.paramSig = paramSignature();
   A.results = null; A.baseline = null; A.elapsed = 0; A.probeTrace = [];
   proto?.reset();
   if (A.backend === 'webgpu') makeGpu();
   view.setModel({ topo: A.topo, st: A.model.st, scene: A.scene }, { keepCamera: !!opts.keepCamera });
   view.setStrandSelection(A.lathSel);
-  refreshOverlays(); display.applyColouring(); display.refreshJoints(); display.refreshDiagram(); drawChart(); updateStatus(); updateSummaries();
+  knots?.onModel();
+  refreshOverlays(); display.applyColouring(); display.refreshJoints(); display.refreshDiagram(); drawChart(); updateStatus(); updateSummaries(); updateResetTitle();
 }
 
 function makeGpu() {
   try {
     A.gpu = new GpuSolver(A.device, [A.model], { perSubmit: 64 });
     A.gpu.compileInfo().then((msgs) => { const err = msgs.filter(m => m.startsWith('error')); if (err.length) { console.error(err.join('\n')); status('WebGPU shader errors — switched to the CPU solver', 'warn'); setBackend('cpu'); } });
-  } catch (e) { console.error(e); status('WebGPU solver failed (' + e.message + ') — CPU solver', 'warn'); A.gpu = null; A.backend = 'cpu'; }
+  } catch (e) {
+    console.error(e); status('WebGPU solver failed (' + e.message + ') — CPU solver', 'warn'); A.gpu = null; A.backend = 'cpu';
+    qsa('#backend-chips .chip').forEach(c => c.classList.toggle('on', c.dataset.backend === 'cpu')); updateBackendReadout?.();
+  }
   A.gpuChunk = 64;
 }
 function disposeGpu() { if (A.gpu) { A.gpu.dispose(); A.gpu = null; } }
@@ -145,13 +157,13 @@ function updateBackendReadout() {
   const g = A.gpu;
   $('ro-backend').innerHTML = A.backend === 'webgpu'
     ? `f32 arithmetic with 64-bit fixed-point positions, frames, contact parameters and force sums${g ? ` (2^-${g.PB} length, 2^-${g.FB} force)` : ''}; exact, order-independent accumulation — bit-reproducible on this GPU. Contacts stiffer than ~k·w·6e-8 per crossing leave a residual floor: <span class="acc">f64 polish</span> finishes on the CPU.`
-    : 'double precision on the CPU — the reference (same algorithm as the Python solver, agreement to rounding until the stick–slip chaos takes over)';
+    : 'double precision on the CPU — the reference solver (the WebGPU solver runs the same algorithm in f32 with exact fixed-point sums)';
 }
 const waitIdle = async () => { while (A.busy) await new Promise(r => setTimeout(r, 10)); };
 /** run fn with the solve loop held off (no chunk can start in between) */
 async function exclusive(fn) { await waitIdle(); A.busy = true; try { return await fn(); } finally { A.busy = false; } }
 
-// --- live edits (Python viewer: goal_signature → rebuild_goals) ------------------------------------------------------
+// --- live edits (goal signature → rebuild the goals of the running model) -----------------------------------------
 function goalSignature() {
   const sc = A.scene; if (!sc) return '';
   const c = { ...sc.contact }; delete c.locked;
@@ -186,9 +198,9 @@ function startRun() {
   A.running = true; A.runFirst = true; A.runUntil = A.model.st.iteration + Math.max(1, A.scene.solver.max_iter | 0);
   if (proto) A.runUntil = proto.runTarget(A.runUntil);                 // a pending settle stops the run at its end
   A.model.converged = false;
-  $('btn-run').textContent = 'Pause'; $('btn-run').classList.add('running');
+  $('btn-run').textContent = 'Pause'; $('btn-run').classList.add('running'); mon?.updateRun();
 }
-function stopRun() { A.running = false; const b = $('btn-run'); if (b) { b.textContent = 'Run'; b.classList.remove('running'); } }
+function stopRun() { A.running = false; const b = $('btn-run'); if (b) { b.textContent = 'Run'; b.classList.remove('running'); } mon?.updateRun(); }
 
 async function solveChunk() {
   if (A.busy || !A.model) return;
@@ -209,7 +221,7 @@ async function solveChunk() {
       if (done) { m.converged = ctl.done === 1 && ctl.resid <= sp.tol; stopRun(); proto.onRunEnd(); finishRun(); }
     } else {
       const every = Math.max(1, sp.live_every | 0);
-      while (performance.now() - t0 < 14 && !m.converged && m.st.iteration < A.runUntil) { if (A.runFirst) { m.converged = false; A.runFirst = false; } m.step(Math.min(every, A.runUntil - m.st.iteration)); }
+      while (performance.now() - t0 < 14 && !m.converged && m.st.iteration < A.runUntil) { if (A.runFirst) { m.converged = false; A.runFirst = false; } m.step(Math.min(every, A.runUntil - m.st.iteration)); recordKnots(); }
       afterSteps();
       if (m.converged || m.st.iteration >= A.runUntil) { stopRun(); proto.onRunEnd(); finishRun(); }
     }
@@ -218,7 +230,7 @@ async function solveChunk() {
   finally { A.busy = false; }
 }
 
-/** Step: n iterations (stops early at convergence, as Solver.step) */
+/** Step: n iterations (stops early at convergence) */
 async function stepN(n) {
   if (!A.model || A.busy) return;
   stopRun();
@@ -227,8 +239,16 @@ async function stepN(n) {
   try {
     await syncSolver();
     const t0 = performance.now();
-    if (A.gpu) { await A.gpu.step(n, { force: true }); await syncFromGpu(); }
-    else { A.model.converged = false; A.model.step(n); }
+    if (A.gpu) {                                                     // GPU: a few synced chunks, so the knot charts cover the step
+      const ch = Math.max(256, Math.ceil(n / 12));
+      for (let left = n, first = true; left > 0;) { const k = Math.min(ch, left); const ctl = (await A.gpu.step(k, { force: first }))[0]; first = false; left -= k; if (left > 0 && khist.K) { await syncFromGpu(); recordKnots(); } if (ctl && ctl.done === 1) break; }
+      await syncFromGpu();                                           // the host model carries the final state
+    }
+    else {                                                           // in chunks, so that the knot charts cover the step
+      A.model.converged = false;
+      const ch = Math.max(Math.max(1, A.scene.solver.live_every | 0), Math.ceil(n / 120));
+      for (let left = n; left > 0 && !A.model.converged;) { const k = Math.min(ch, left); A.model.step(k); left -= k; recordKnots(); }
+    }
     A.elapsed += (performance.now() - t0) / 1000;
     afterSteps(); proto.onRunEnd(); finishRun();
   } finally { A.busy = false; }
@@ -239,12 +259,45 @@ function afterSteps() {
   proto.sync();
   if (display.hasJoints()) display.refreshJointsThrottled();
   recordProbe();
+  recordKnots();
   A.dirty.results = true;
-  drawChart(); updateStatus();
+  mon.schedule(); updateStatus();
 }
-function finishRun() { refreshResults(); if (display.hasJoints()) display.refreshJoints(); updateStatus(); }
+function finishRun() {
+  recordKnots(true); refreshResults(); if (display.hasJoints()) display.refreshJoints(); drawChart(); updateStatus(); updateResetTitle();
+  if (mon.autoStability()) setTimeout(() => computeStability(), 30);
+}
+/** the probe for the knot records: its node, its position in the woven geometry and the unit axis (or null) */
+let probeCache = { key: '', v: null };
+function probeRef() {
+  const pr = probeOf(A.scene); if (!pr || !A.model) return null;
+  const key = `${pr.frame}|${pr.axis}|${A.topo ? A.topo.nKnots : 0}`;
+  if (probeCache.key === key && probeCache.st === A.model.st) return probeCache.v;
+  const nid = A.model.st.nodeFrameIds.get(fkey(pr.frame[0], pr.frame[1]));
+  const ax = pr.axis || [0, 0, -1], nn = Math.hypot(...ax) || 1;
+  probeCache = { key, st: A.model.st, v: nid === undefined ? null : { node: nid, P0: A.topo.frameOrigin(pr.frame[0], pr.frame[1]), axis: ax.map(v => v / nn) } };
+  return probeCache.v;
+}
+function recordKnots(force = false) { khist.record(force, probeRef()); }
+/** stability of the current state (stability.js): the softest mode of the tangent stiffness (Monitor › Stability) */
+async function computeStability() {
+  if (!A.model) return;
+  if (A.busy) { setTimeout(() => computeStability(), 60); return; }
+  stopRun();
+  A.busy = true;
+  try {
+    await syncFromGpu();
+    status('stability: tangent stiffness of the current state …');
+    await new Promise(r => setTimeout(r, 30));
+    const s = stability(A.model);
+    recordKnots(true); khist.addStability(A.model.st.iteration, s);
+    status(`stability at iteration ${A.model.st.iteration}: softest mode λ = ${s.lam.toExponential(3)} · ${s.neg ? s.neg + ' unstable mode' + (s.neg === 1 ? '' : 's') : 'stable'} · ${s.ndof} dof, ${s.evaluations} force evaluations, ${(s.ms / 1000).toFixed(1)} s`, s.neg ? 'warn' : '');
+    mon.drawStab(); mon.redraw();
+  } catch (e) { console.error(e); status('stability failed: ' + e.message, 'warn'); }
+  finally { A.busy = false; }
+}
 
-/** Python _record_probe: probe travel along its axis vs the point loads on the probe frame (strip › probe) */
+/** probe travel along its axis vs the point loads on the probe frame (Monitor › Probe · UTM, live probe) */
 function recordProbe() {
   const pr = probeOf(A.scene); if (!pr || !A.model) return;
   const nid = A.model.st.nodeFrameIds.get(fkey(pr.frame[0], pr.frame[1])); if (nid === undefined) return;
@@ -255,54 +308,9 @@ function recordProbe() {
   const tr = A.probeTrace; if (!tr.length || tr[tr.length - 1][0] !== d) tr.push([d, f]); if (tr.length > 4000) tr.splice(0, tr.length - 4000);
 }
 
-// =========================================================================================================== chart
-function drawChart() {
-  if (A.stripTab === 'disc') { disc?.redraw(); return; }
-  const cv = $('chart'), which = $('sel-chart').value, m = A.model, H = m?.st.history, sc = A.scene;
-  const lg = $('chart-legend');
-  if (which === 'utm') {
-    const series = [];
-    if (A.utm) series.push({ x: A.utm.displacement, y: A.utm.force, color: cssv('--fg'), dots: true, r: 1.6, label: 'UTM' });
-    if (A.replay) for (const b of replayBranches(A.replay)) series.push({ x: b.d, y: b.f, color: cssv('--chart-1'), width: 1.6, label: series.some(s => s.label === 'replay') ? '' : 'replay' });
-    if (A.probeTrace.length) series.push({ x: A.probeTrace.map(p => p[0]), y: A.probeTrace.map(p => p[1]), color: cssv('--chart-2'), label: 'live probe' });
-    lg.innerHTML = '<span class="dim">probe force against crosshead travel</span>';
-    drawPlot(cv, { series, xlabel: sc ? `travel [${sc.units.length}]` : '', compact: true, empty: 'no UTM curve or probe yet' });
-  } else if (which === 'parts' && H && H.strain.length) {
-    const w = chartWindow(H), mk = (arr, c, label, wd) => ({ x: w.xs, y: arr.slice(w.n0), color: cssv(c), label, width: wd });
-    lg.innerHTML = `<span class="lg c1">bending</span><span class="lg c2">torsion</span><span class="lg c3">stretch</span><span class="lg c4">contact</span><span class="dim">total — [${sc.units.force}·${sc.units.length}]</span>`;
-    drawPlot(cv, { series: [mk(H.strain, '--fg', '', 1.8), mk(H.bending, '--chart-1'), mk(H.torsion, '--chart-2'), mk(H.stretch, '--chart-3'), mk(H.contact, '--chart-4')], compact: true, empty: 'no iterations yet', ...w.spec });
-  } else if (which === 'parts') {
-    lg.innerHTML = `<span class="lg c1">bending</span><span class="lg c2">torsion</span><span class="lg c3">stretch</span><span class="lg c4">contact</span>`;
-    drawPlot(cv, { series: [], compact: true, empty: 'no iterations yet' });
-  } else {
-    const series = []; let spec = {};
-    if (H && H.residual.length) {
-      const w = chartWindow(H), n0 = w.n0, n = H.residual.length, xs = w.xs;
-      let kmax = 0; for (let i = n0; i < n; i++) kmax = Math.max(kmax, H.kinetic[i]);
-      series.push({ x: xs, y: H.kinetic.slice(n0).map(v => v / (kmax || 1)), color: cssv('--chart-2'), width: 1.1 });
-      series.push({ x: xs, y: H.residual.slice(n0), color: cssv('--chart-1'), width: 1.6 });
-      series.push({ x: [xs[0], w.spec.xmax], y: [sc.solver.tol, sc.solver.tol], color: cssv('--ok'), dash: [4, 3], width: 1 });
-      spec = w.spec;
-    }
-    lg.innerHTML = '<span class="lg c1">residual (unbalanced / max force)</span><span class="lg c2">kinetic / max</span><span class="dim">· tol</span>';
-    drawPlot(cv, { series, logY: true, compact: true, empty: 'no iterations yet', ...spec });
-  }
-  const st = m?.st, el = $('strip-text');
-  el.textContent = st ? `iteration ${st.iteration} · residual ${Number.isFinite(st.residual) ? st.residual.toExponential(3) : '—'} (tol ${fmt(sc.solver.tol, 3)})${m.converged ? ' · converged' : ''} · strain ${fmt(H.strain.at(-1) ?? 0)} ${sc.units.force}·${sc.units.length}` : 'no model';
-  const pl = st && proto ? proto.line() : '';
-  if (pl) { const sp = document.createElement('span'); sp.className = 'proto-line'; sp.innerHTML = pl; el.append(document.createElement('br'), sp); }
-}
-/** the strip chart's x window over the history (last 4000 iterations, widened to keep the latest Zero in view and
- *  to reach the planned end of a pending settle) with the protocol's phase bands */
-function chartWindow(H) {
-  const n = H.residual.length, last = A.model.st.iteration, first = last - n + 1;
-  const pw = proto ? proto.chart(first, last) : { start: Math.max(first, last - 3999), xmax: last, bands: [], vlines: [] };
-  const n0 = Math.min(Math.max(0, pw.start - first), Math.max(n - 1, 0));
-  const xs = Array.from({ length: n - n0 }, (_, i) => first + n0 + i);
-  const spec = { xmin: xs[0], xmax: Math.max(xs[xs.length - 1], pw.xmax), bands: pw.bands, vlines: pw.vlines };
-  A.chartWin = { xmin: spec.xmin, xmax: spec.xmax, bands: spec.bands.map(b => `${b.label} ${b.x0}–${b.x1}`), vlines: spec.vlines.map(v => v.x) };   // console
-  return { n0, xs, spec };
-}
+// =========================================================================================================== charts
+/** redraw the Monitor's open charts (monitor_ui.js) */
+function drawChart() { mon?.redraw(); }
 const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 // =========================================================================================================== results
@@ -332,7 +340,7 @@ function updateExtremes() {
   $('sum-results').textContent = `${r.iterations} it${r.converged ? ' · converged' : ''}`;
 }
 
-/** Python Results.to_dict: per-strand segment arrays, knot values by edge id, node displacements, reactions */
+/** results as JSON: per-strand segment arrays, knot values by edge id, node displacements, reactions */
 function resultsJSON() {
   const r = A.results, st = A.model.st, topo = A.topo;
   const perStrand = (arr) => { const out = []; for (let s = 0; s < st.S; s++) out.push(Array.from(arr.slice(st.segOffset[s], st.segOffset[s + 1]))); return out; };
@@ -363,7 +371,7 @@ function refreshOverlays() {
   const pr = probeOf(sc);
   if (pr) { const nid = frameNode(pr.frame[0], pr.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: pr.axis || [0, 0, -1], label: 'probe', color: cssv('--accent') }); }
   for (const p of calib?.probeMarkers?.() || []) { const nid = frameNode(p.frame[0], p.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: p.axis, label: p.label, color: p.color }); }
-  view.setOverlays({ loads, anchors, selection, probes, frames: view.visible.frames, arrowScale: +$('sl-arrow').value });
+  view.setOverlays({ loads, anchors, selection, probes, knotMarks: knots ? knots.marks() : [], frames: view.visible.frames, arrowScale: +$('sl-arrow').value });
   updateSelectionReadouts(); renderLists(); updateSummaries();
 }
 
@@ -408,6 +416,7 @@ function frameAtPick(p) {
 
 function onPick(ev) {
   const p = view.pick(ev.clientX, ev.clientY);
+  if (knots?.picking()) { knots.onPick(p, frameAtPick); return; }
   if (A.mode === 'laths') {
     let s = null;
     if (p && p.kind === 'lath') s = p.strand;
@@ -521,6 +530,12 @@ function writeBound(el) {
   else if (path === 'section.width') { resetModel({ keepCamera: true }); }
   onSceneEdited(path);
 }
+/** Reset says what it discards */
+function updateResetTitle() {
+  const b = $('btn-reset'); if (!b) return;
+  const it = A.model ? A.model.st.iteration : 0;
+  b.title = it ? `Reset: back to the woven geometry — discards ${it} iterations, their history, the followed values and the Zero reference` : 'Reset: back to the woven geometry';
+}
 function onSceneEdited() { updateSectionReadout(); updateContactReadout(); updateSummaries(); drawChart(); calib?.onSceneEdit?.(); }
 
 function syncPanels() {
@@ -619,9 +634,9 @@ function parseUtm() {
     A.utm = parseUTMCsv(A.utmText, sc.units, { forceCol: $('sel-utmforce').value || null, dispCol: $('sel-utmdisp').value || null, source: A.utmName, fileUnits: null });
     if (!/[([]/.test(A.utm.columns.force || '')) A.utm = parseUTMCsv(A.utmText, sc.units, { forceCol: $('sel-utmforce').value || null, dispCol: $('sel-utmdisp').value || null, source: A.utmName, fileUnits });
     sc.utm.units = fileUnits;
-    status(`UTM: ${A.utm.length} rows (${A.utm.columns.force} / ${A.utm.columns.displacement})`);
+    status(`UTM: ${A.utm.length} rows (${A.utm.columns.force} / ${A.utm.columns.displacement})${A.utm.columns.zeroed ? ` · travel from the first sample (position ${A.utm.columns.zeroed} ${A.utm.columns.length_unit} = 0)` : ''}`);
   } catch (e) { A.utm = null; status('UTM csv: ' + e.message, 'warn'); }
-  updateUtmReadout(); drawUtmPlot(); drawChart();
+  updateUtmReadout(); drawUtmPlot();
 }
 
 const REPLAY_FIELDS = [['mode', 'mode', 'sel', ['force', 'displacement']], ['relax_iter', 'relax iterations', 'int'], ['step_iter', 'iterations / increment', 'int'], ['avg_iter', 'averaged over', 'int'], ['n_steps', 'increments / branch', 'int'], ['cycles', 'cycles (force)', 'int'], ['max_force', 'peak force (blank = curve)', 'num'], ['lock', 'lock crossings', 'bool']];
@@ -639,7 +654,6 @@ function buildReplayGrid() {
     replaySet[k] = el.type === 'checkbox' ? el.checked : el.tagName === 'SELECT' ? el.value : (el.value === '' ? null : +el.value);
   }));
 }
-function replayBranches(r) { return Array.isArray(r) ? r : [{ d: r.d, f: r.f }]; }
 let replayAbort = null;
 async function runReplay() {
   const sc = A.scene, pr = probeOf(sc);
@@ -659,17 +673,13 @@ async function runReplay() {
     let txt = `replay ${((performance.now() - t0) / 1000).toFixed(1)} s on ${cs.backend === 'gpu' ? 'WebGPU' : 'CPU f64'}`;
     if (A.utm) { const res = cs.residuals({ [t.name]: A.replay }, [t]); txt += ` · residual ${(100 * res[t.name]).toFixed(2)} % of the measured ${replaySet.mode === 'force' ? 'travel range' : 'peak force'}`; }
     $('ro-utm').textContent = txt;
+    mon.openGroup('mon-probe');
   } catch (e) { $('ro-utm').textContent = e.name === 'AbortError' ? 'stopped' : 'replay failed: ' + e.message; if (e.name !== 'AbortError') console.error(e); }
   finally { $('btn-replay').disabled = false; $('btn-replay-stop').disabled = true; replayAbort = null; }
-  drawUtmPlot(); drawChart();
+  drawUtmPlot();
 }
-function drawUtmPlot() {
-  const sc = A.scene; if (!sc) return;
-  const series = [];
-  if (A.utm) series.push({ x: A.utm.displacement, y: A.utm.force, color: cssv('--fg'), dots: true, r: 1.8, label: 'UTM' });
-  if (A.replay) replayBranches(A.replay).forEach((b, i) => series.push({ x: b.d, y: b.f, color: cssv('--chart-1'), width: 1.6, dots: true, line: true, r: 2, label: i ? '' : 'model', alpha: b.cycle === 0 ? 0.55 : 1 }));
-  drawPlot($('utm-plot'), { series, xlabel: `crosshead travel [${sc.units.length}]`, ylabel: `force [${sc.units.force}]`, legend: 'top', empty: 'load a UTM csv and / or replay' });
-}
+/** the force–travel chart of the probe (Monitor › Probe · UTM) */
+function drawUtmPlot() { if (A.scene) mon?.drawProbe(); }
 
 // =========================================================================================================== files
 async function readFileList(files) {
@@ -759,11 +769,17 @@ async function export3dm() {
 }
 
 // =========================================================================================================== init
-let calib = null, display = null, disc = null, proto = null;
+let calib = null, display = null, disc = null, proto = null, knots = null, mon = null;
 async function init() {
   view = new View($('gl'), $('labels')); A.view = view;
+  initInfo();
   display = initDisplay({ A, $, qsa, fmt, store, status, refreshResults: () => refreshResults() });
-  disc = initDiscretize({ A, $, qsa, status, cssv, store, download, onJoints: () => { display.onJoints(); updateSummaries(); }, drawSolveChart: () => drawChart() });
+  mon = initMonitor({ A, $, qsa, store, cssv, fmt, proto: () => proto, hist: () => khist, probe: () => probeOf(A.scene),
+    toggleRun: () => $('btn-run').click(), computeStability: () => computeStability() });
+  knots = initKnots({ A, $, qsa, status, cssv, store, mon, hist: () => khist, refreshOverlays, setPickBanner, probe: () => probeOf(A.scene) });
+  mon.setKnots(knots); A.knots = knots; A.monitor = mon;                // console / tests: weavesim.knots, weavesim.monitor
+  disc = initDiscretize({ A, $, qsa, status, cssv, store, download, shown: (id) => mon.shown(id), onJoints: () => { display.onJoints(); updateSummaries(); } });
+  mon.setDisc(disc);
   proto = initProtocol({ A, $, status, fmt, cssv, store, stopRun, startRun, exclusive, syncFromGpu, goalSignature, paramSignature,
     readLockBox: () => readBound($('ck-locked')), drawChart: () => drawChart(), updateSummaries: () => updateSummaries(),
     refreshViews: () => { if (A.model) view.updateGeometry(A.model.st); display.applyColouring(); display.refreshDiagram(); } });
@@ -801,7 +817,7 @@ function setTheme(t) {
   if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
   qsa('#theme-chips .chip').forEach(c => c.classList.toggle('on', c.dataset.theme === t));
   store.set('theme', t);
-  view.applyTheme(); drawChart(); drawUtmPlot(); calib?.redraw?.(); disc?.redraw(); display?.applyColouring();
+  view.applyTheme(); knots?.renderChips(); drawChart(); calib?.redraw?.(); display?.applyColouring(); refreshOverlays();
 }
 
 function bindNav() {
@@ -818,7 +834,7 @@ function bindNav() {
   gl.addEventListener('pointerleave', () => { $('tooltip').hidden = true; });
   window.addEventListener('keydown', (e) => {
     if (e.target.matches('input, select, textarea')) return;
-    if (e.key === 'Escape') { if (A.mode !== 'none') setMode(A.mode); else if (calib?.pickMode?.()) calib.cancelPick(); else if (A.lathSel.size) setLathSelection([]); else select([]); }
+    if (e.key === 'Escape') { if (knots?.picking()) knots.cancelPick(); else if (A.mode !== 'none') setMode(A.mode); else if (calib?.pickMode?.()) calib.cancelPick(); else if (A.lathSel.size) setLathSelection([]); else select([]); }
     else if (e.key === 'h' || e.key === 'H') view.home();
     else if (e.key === 'f' || e.key === 'F') view.fit();
     else if (e.key === 't' || e.key === 'T') $('nav-turn').click();
@@ -833,11 +849,10 @@ function bindNav() {
 }
 
 function bindPanels() {
-  // strip
+  // Monitor run bar
   $('btn-run').onclick = () => { if (A.running) stopRun(); else startRun(); };
   $('btn-step').onclick = () => stepN(Math.max(1, +$('nb-step').value | 0));
-  $('btn-reset').onclick = () => resetModel({ keepCamera: true });
-  $('sel-chart').onchange = drawChart;
+  $('btn-reset').onclick = () => { resetModel({ keepCamera: true }); status('reset: back to the woven geometry'); };
   $('st-backend').onclick = () => setBackend(A.backend === 'webgpu' ? 'cpu' : 'webgpu');
   // file
   $('sel-example').onchange = (e) => { if (e.target.value) loadExample(e.target.value); };
@@ -946,7 +961,7 @@ function bindPanels() {
   $('btn-replay').onclick = runReplay; $('btn-replay-stop').onclick = () => replayAbort?.abort();
   // view
   qsa('#theme-chips .chip').forEach(c => { c.onclick = () => setTheme(c.dataset.theme); });
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { view.applyTheme(); drawChart(); drawUtmPlot(); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { view.applyTheme(); knots?.renderChips(); drawChart(); });
   qsa('#layer-chips .chip').forEach(c => { c.onclick = () => { c.classList.toggle('on'); view.setVisible(c.dataset.layer, c.classList.contains('on')); if (c.dataset.layer === 'frames') refreshOverlays(); }; });
   $('sl-deform').oninput = (e) => { $('out-deform').textContent = e.target.value; view.setDeform(+e.target.value); display.refreshJoints(); display.refreshDiagram(); };
   $('sl-arrow').oninput = (e) => { $('out-arrow').textContent = (+e.target.value).toFixed(1); refreshOverlays(); };
@@ -954,7 +969,7 @@ function bindPanels() {
   // modal
   $('modal-close').onclick = () => { $('modal').hidden = true; };
   $('modal-copy').onclick = () => { navigator.clipboard?.writeText($('modal-text').value); status('copied'); };
-  window.addEventListener('resize', () => { drawChart(); drawUtmPlot(); calib?.redraw?.(); disc?.redraw(); });
+  window.addEventListener('resize', () => { calib?.redraw?.(); });
 }
 
 /** continue from the current (GPU) state on the CPU in f64 until the residual is below the tolerance */

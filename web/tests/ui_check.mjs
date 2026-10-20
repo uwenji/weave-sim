@@ -23,7 +23,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, dev
 const errors = [];
 page.on('console', m => { const t = m.text(); if (t.includes('experimental on this platform')) return; if (m.type() === 'error' || m.type() === 'warning') errors.push(`${m.type()}: ${t}`); console.log(`[${m.type()}] ${t}`); });
 page.on('pageerror', e => { errors.push('PAGEERROR ' + e.message); console.log('PAGEERROR', e.message, e.stack); });
-await page.addInitScript((b) => { try { localStorage.setItem('weavesim.backend', JSON.stringify(b)); } catch (e) {} }, backend);
+await page.addInitScript((b) => { try { localStorage.setItem('weavesim.displayOpen', 'true'); localStorage.setItem('weavesim.backend', JSON.stringify(b)); } catch (e) {} }, backend);
 await page.goto(`http://localhost:${port}/web/index.html${process.argv[5] ? '?' + process.argv[5] : ''}`);
 const shot = async (name) => { await page.screenshot({ path: `${out}/${name}.png` }); console.log('shot', name); };
 const text = (sel) => page.$eval(sel, el => el.textContent);
@@ -35,7 +35,7 @@ if (steps.includes('run')) {
   await page.waitForTimeout(+(process.env.RUN_MS || 20000));
   await page.click('#btn-run');
   await page.waitForTimeout(1500);
-  console.log('after run:', await text('#statusbar'), '|', await text('#strip-text'));
+  console.log('after run:', await text('#statusbar'), '|', await text('#run-text'));
   await shot('02_run');
 }
 if (steps.includes('layers')) {
@@ -48,7 +48,7 @@ if (steps.includes('layers')) {
   await shot('03_layer_Mx');
 }
 if (steps.includes('calib')) {
-  await page.evaluate(() => { document.querySelectorAll('details.sec').forEach(d => { d.open = d.id === 'sec-calib'; }); });
+  await page.evaluate(() => { document.querySelectorAll('#sections > details.sec').forEach(d => { d.open = d.id === 'sec-calib'; }); });
   await page.click('#cal-example');
   await page.waitForFunction(() => !document.getElementById('cal-main').hidden, null, { timeout: 120000 });
   await page.waitForTimeout(1500);

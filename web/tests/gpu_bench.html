@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU throughput</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// Throughput of the GPU solver: B instances of one scene in the same dispatches, iterations per second after a warm-up
+// (the command buffers of `n` iterations and one control read-back are timed), next to the CPU f64 solver.
+//   ?case=v5dome_cm  &B=1,4,16  &n=384  &warm=64
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const name = q.get('case') || 'v5dome_cm', Bs = (q.get('B') || '1,4,16').split(',').map(Number), n = +(q.get('n') || 384), warm = +(q.get('warm') || 64);
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  const { sc, topo, contacts } = await caseByName(name);
+  const cpu = new CpuSolver(sc, topo, { contacts }); cpu.step(20);
+  let t0 = performance.now(); cpu.step(200); const cpuIt = 200 / ((performance.now() - t0) / 1000);
+  const st = cpu.st;
+  log(`${name}: ${st.n} nodes · ${st.m} segments · ${st.K} crossings   CPU f64 ${cpuIt.toFixed(0)} it/s   adapter ${dev.wsInfo?.architecture || dev.wsInfo?.vendor || '?'}`);
+  for (const B of Bs) {
+    const models = Array.from({ length: B }, () => new CpuSolver(sc, topo, { contacts }));
+    const g = new GpuSolver(dev, models, { perSubmit: 64 });
+    await g.step(warm, { force: false });
+    t0 = performance.now(); await g.step(n, { force: false }); const dt = (performance.now() - t0) / 1000;
+    log(`  B = ${String(B).padStart(3)}: ${(n / dt).toFixed(1)} it/s   (${(B * n / dt).toFixed(0)} instance·it/s)`);
+    g.dispose();
+  }
+  window.__done = true;
+})();
+</script></body></html>

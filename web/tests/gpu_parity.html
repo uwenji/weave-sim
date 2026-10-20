@@ -1,0 +1,123 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU parity</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// GPU (f32 + fixed point) against the CPU f64 reference, per case:
+//  1 · trajectory: both solvers stepped to the same checkpoints; positions, frames (angle between the CPU and GPU
+//      frame), body angular velocities, residual and kinetic energy — next to a perturbed CPU run, the yardstick of the
+//      chaos (kinetic-damping event timing, stick–slip switching) that separates any two runs: start positions ×
+//      (1 + pert), and for a case with contacts an f32-sized kick at the end of the warm-up (frames rotated by pq rad,
+//      free nodes moved by px · size) — or with yard=noise a continuous one: every frame rotated by ~pq rad in every
+//      iteration from there on (f32-level noise in the weakly damped roll of the frames, as the GPU has it);
+//  2 · end state after `long` iterations (or convergence): positions, contact forces, slip, rod energy, residual.
+//   ?cases=a,b  &cps=1,2,5,…  &long=n  &pert=1e-12  &pq=1e-7  &px=1e-11  &yard=kick|noise  &tol=…
+import { CpuSolver } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { caseByName } from './browser_cases.js';
+import { qexp, qmul, qnormalize } from '../js/quat.js';
+import { Rng } from '../js/rng.js';
+const q = new URLSearchParams(location.search);
+const names = (q.get('cases') || 'cantilever,cantilever_edge,torsion,cross_press,cross_stick,cross_slip,cross_locked').split(',');
+const cps = (q.get('cps') || '1,2,3,5,10,20,50,100,150,200,300,400,500').split(',').map(Number);
+const pert = +(q.get('pert') || 1e-12), pq = +(q.get('pq') ?? 1e-7), px = +(q.get('px') ?? 1e-11), noise = q.get('yard') === 'noise';
+/** the f32-sized kick of the yardstick run: frames rotated by ~pq rad, free nodes moved by ~px × model size */
+const rngN = new Rng(17);
+function kick(sv, frameOnly = false, rng = new Rng(5)) {
+  const st = sv.st, dq = new Float64Array(4), qq = new Float64Array(4);
+  let size = 0; for (const v of st.X) size = Math.max(size, Math.abs(v));
+  for (let j = 0; j < st.m; j++) { qexp(pq * rng.normal(), pq * rng.normal(), pq * rng.normal(), dq); qmul(st.Q.subarray(4 * j, 4 * j + 4), dq, qq); qnormalize(qq); st.Q.set(qq, 4 * j); }
+  if (!frameOnly) for (let i = 0; i < 3 * st.n; i++) if (sv.anchors.nodeFree[i]) st.X[i] += px * size * rng.normal();
+}
+/** advance the yardstick run to `target` (or its convergence), applying the kick or the continuous noise */
+function stepYard(Ap, kickAt, target) {
+  while (Ap.st.iteration < target && !Ap.converged) {
+    if (kickAt && noise && Ap.st.iteration >= kickAt) { kick(Ap, true, rngN); Ap.step(1); continue; }
+    if (kickAt && Ap.st.iteration === kickAt) kick(Ap);
+    Ap.step(kickAt > Ap.st.iteration ? Math.min(kickAt, target) - Ap.st.iteration : Math.min(noise && kickAt ? 1 : 100, target - Ap.st.iteration));
+  }
+}
+const out = document.getElementById('out'); const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const mx = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const mv = (a) => { let m = 0; for (const v of a) m = Math.max(m, Math.abs(v)); return m; };
+const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-300);
+const relv = (a, b) => mx(a, b) / Math.max(mv(b), 1e-300);
+const rms = (a, b) => { let d = 0, s = 0; for (let i = 0; i < a.length; i++) { d += (a[i] - b[i]) ** 2; s += b[i] ** 2; } return Math.sqrt(d / Math.max(s, 1e-300)); };
+/** largest rotation angle between corresponding segment frames: 2 atan2(|vec(a* ⊗ b)|, |scal(a* ⊗ b)|), insensitive to
+ *  the quaternion norms (the GPU's fixed-point quaternions are unit to ~1e-12 only, which acos(a·b) would read as ~1e-6) */
+const qang = (A, B) => {
+  let m = 0;
+  for (let j = 0; j < A.length; j += 4) {
+    const aw = A[j], ax = -A[j + 1], ay = -A[j + 2], az = -A[j + 3], bw = B[j], bx = B[j + 1], by = B[j + 2], bz = B[j + 3];
+    const w = aw * bw - ax * bx - ay * by - az * bz, x = aw * bx + ax * bw + ay * bz - az * by, y = aw * by - ax * bz + ay * bw + az * bx, z = aw * bz + ax * by - ay * bx + az * bw;
+    m = Math.max(m, 2 * Math.atan2(Math.hypot(x, y, z), Math.abs(w)));
+  }
+  return m;
+};
+/** largest displacement, floored at 1e-9 × the model size (a case without translation, e.g. pure torsion) */
+const dispOf = (st) => { let d = 0, s = 0; for (let i = 0; i < st.X.length; i++) { d = Math.max(d, Math.abs(st.X[i] - st.X0[i])); s = Math.max(s, Math.abs(st.X[i])); } return Math.max(d, 1e-9 * s); };
+const e = (v, d = 2) => (Number.isFinite(v) ? v.toExponential(d) : String(v));
+const LONG = { cantilever: 12000, cantilever_edge: 6000, torsion: 3000, cross_press: 8000, cross_stick: 8000, cross_slip: 4000, cross_locked: 4000, cross_w23: 6000, cross_al: 8000, v5dome_cm: 3000 };
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  const summary = [];
+  for (const name of names) {
+    try {
+      const { sc, topo, contacts } = await caseByName(name);
+      if (q.get('tol')) sc.solver.tol = +q.get('tol');
+      const A = new CpuSolver(sc, topo, { contacts });
+      const Ap = new CpuSolver(sc, topo, { contacts }); for (let i = 0; i < Ap.st.X.length; i++) Ap.st.X[i] *= 1 + pert;
+      const model = new CpuSolver(sc, topo, { contacts });
+      const gpu = new GpuSolver(dev, [model], { perSubmit: 50 });
+      const msgs = await gpu.compileInfo(); if (msgs.some(m => m.startsWith('error'))) { log(name + ' COMPILE ' + msgs.join('\n')); break; }
+      if (!summary.length) log(`WGSL compileInfo: ${msgs.length ? msgs.join(' | ') : 'no errors, no warnings'}`);
+      log(`\n${name}: n ${A.st.n} m ${A.st.m} p ${A.st.p} K ${A.st.K} clamps ${A.beam.cSeg.length}   scales PB ${gpu.PB} FB ${gpu.FB} TB ${gpu.TB} KB ${gpu.KB}`);
+      log(`${'it'.padStart(6)} ${'|ΔX|/disp'.padStart(10)} ${'(pert)'.padStart(9)} ${'∠ΔQ rad'.padStart(9)} ${'(pert)'.padStart(9)} ${'|ΔW|/|W|'.padStart(9)} ${'res cpu'.padStart(9)} ${'res gpu'.padStart(9)} ${'Δres'.padStart(9)} ${'ke cpu'.padStart(10)} ${'Δke'.padStart(9)} ${'(pert)'.padStart(9)}  KD resets cpu/gpu`);
+      const kickAt = contacts && A.contact && pq + px > 0 ? (sc.solver.warmup_iter | 0) : 0;   // f32-sized kick (contact cases)
+      if (kickAt) log(noise ? `   (pert) = CPU with positions × (1 + ${pert}) and every frame rotated by ~${pq} rad in every iteration from ${kickAt}` : `   (pert) = CPU with positions × (1 + ${pert}) and a kick at iteration ${kickAt}: frames ${pq} rad, nodes ${px} × size`);
+      let done = 0, firstDiv = null;
+      const resets = (H) => H.kinetic.reduce((s, v) => s + (v === 0 ? 1 : 0), 0);   // kinetic-damping resets (ke = 0)
+      const trace = [];
+      for (const cp of cps) {
+        while (A.st.iteration < cp && !A.converged) A.step(1);                 // stops at convergence, as the GPU does
+        stepYard(Ap, kickAt, cp);
+        if (cp - done > 0) { await gpu.step(cp - done, { force: false }); done = cp; }
+        await gpu.download(0);
+        const a = A.st, b = model.st, ap = Ap.st;
+        const disp = Math.max(dispOf(a), 1e-300);
+        const row = { it: cp, gpuIt: b.iteration, dX: mx(a.X, b.X) / disp, dXp: mx(a.X, ap.X) / disp, dQ: qang(a.Q, b.Q), dQp: qang(a.Q, ap.Q), dW: relv(b.Wr, a.Wr),
+          resA: a.residual, resG: b.residual, dRes: rel(b.residual, a.residual), keA: A.kePrev, dKe: rel(model.kePrev, A.kePrev), dKep: rel(Ap.kePrev, A.kePrev) };
+        trace.push(row);
+        if (firstDiv === null && row.dX > 1e-3) firstDiv = cp;
+        log(`${String(cp).padStart(6)} ${e(row.dX).padStart(10)} ${e(row.dXp).padStart(9)} ${e(row.dQ).padStart(9)} ${e(row.dQp).padStart(9)} ${e(row.dW).padStart(9)} ${e(row.resA).padStart(9)} ${e(row.resG).padStart(9)} ${e(row.dRes).padStart(9)} ${e(row.keA, 3).padStart(10)} ${e(row.dKe).padStart(9)} ${e(row.dKep).padStart(9)}  ${resets(a.history)}/${resets(b.history)}`);
+        if (b.iteration !== cp || a.iteration !== cp) log(`   (stopped at cpu ${a.iteration} / gpu ${b.iteration})`);
+      }
+      // long run: both to `long` iterations or convergence
+      const n = +(q.get('long') || 0) || LONG[name] || 3000;
+      const t0 = performance.now(); while (A.st.iteration < n && !A.converged) A.step(Math.min(100, n - A.st.iteration)); const tc = performance.now() - t0;
+      stepYard(Ap, kickAt, n);
+      const t1 = performance.now(); let left = n - model.st.iteration;
+      while (left > 0) { const k = Math.min(1000, left); const c = await gpu.step(k, { force: false }); left -= k; if (c[0].done) break; }
+      await gpu.download(0); const tg = performance.now() - t1;
+      const a = A.st, b = model.st, disp = Math.max(dispOf(a), 1e-300);
+      const fin = { name, itA: a.iteration, itG: b.iteration, convA: A.converged, convG: model.converged, resA: a.residual, resG: b.residual,
+        dX: mx(a.X, b.X) / disp, dQ: qang(a.Q, b.Q), dE: rel(model.beam.energy, A.beam.energy), eA: A.beam.energy, shearA: A.beam.energyParts.shear, shearG: model.beam.energyParts.shear,
+        msCpu: tc, msGpu: tg, firstDiv };
+      if (A.contact) { fin.dFn = rms(model.contact.Fn, A.contact.Fn); fin.FnA = Array.from(A.contact.Fn.slice(0, 3)); fin.FnG = Array.from(model.contact.Fn.slice(0, 3)); fin.slipA = a.slip.reduce((s, v) => s + v, 0); fin.slipG = b.slip.reduce((s, v) => s + v, 0); fin.stateA = A.contact.state.reduce((s, v) => s + v, 0); fin.stateG = model.contact.state.reduce((s, v) => s + v, 0); }
+      // the same end-state differences between the CPU and its perturbed run (the chaos yardstick)
+      const ap = Ap.st;
+      fin.pert = { it: ap.iteration, res: ap.residual, dX: mx(a.X, ap.X) / disp, dQ: qang(a.Q, ap.Q), dE: rel(Ap.beam.energy, A.beam.energy) };
+      if (A.contact) { fin.pert.dFn = rms(Ap.contact.Fn, A.contact.Fn); fin.pert.slip = ap.slip.reduce((s, v) => s + v, 0); }
+      log(`end: it ${fin.itA}/${fin.itG} conv ${fin.convA}/${fin.convG} res ${e(fin.resA)}/${e(fin.resG)}  |ΔX|/disp ${e(fin.dX)}  ∠ΔQ ${e(fin.dQ)}  rod energy ${e(fin.eA, 5)} Δ ${e(fin.dE)}  shear ${e(fin.shearA, 4)}/${e(fin.shearG, 4)}` +
+        (A.contact ? `  Fn rms Δ ${e(fin.dFn)}  Fn[0] ${fin.FnA[0].toFixed(5)}/${fin.FnG[0].toFixed(5)}  Σslip ${fin.slipA.toFixed(5)}/${fin.slipG.toFixed(5)}  slipping ${fin.stateA}/${fin.stateG}` : '') +
+        `   first |ΔX|/disp > 1e-3 at ${firstDiv ?? '—'}   (${tc.toFixed(0)} ms cpu, ${tg.toFixed(0)} ms gpu)` +
+        `\n     (pert) CPU vs perturbed CPU: it ${fin.itA}/${fin.pert.it} res ${e(fin.resA)}/${e(fin.pert.res)}  |ΔX|/disp ${e(fin.pert.dX)}  ∠ΔQ ${e(fin.pert.dQ)}  rod energy Δ ${e(fin.pert.dE)}` +
+        (A.contact ? `  Fn rms Δ ${e(fin.pert.dFn)}  Σslip ${fin.slipA.toFixed(5)}/${fin.pert.slip.toFixed(5)}` : ''));
+      summary.push(fin);
+      gpu.dispose();
+    } catch (err) { log(name + ' ERROR ' + err.message + '\n' + err.stack); }
+  }
+  log('\nJSON ' + JSON.stringify(summary));
+  window.__done = true;
+})();
+</script></body></html>

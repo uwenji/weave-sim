@@ -15,7 +15,7 @@ export const CONTACT = {
 };
 export const BEAM = {
   mode: 'simple', activation: 1.0, stiffness: 1.0, activation_flat: 1.0, activation_edge: 1.0, activation_twist: 1.0,
-  stiffness_flat: 1.0, stiffness_edge: 1.0, stiffness_twist: 1.0, stiffness_axial: 1.0,
+  stiffness_flat: 1.0, stiffness_edge: 1.0, stiffness_twist: 1.0, stiffness_axial: 1.0, stiffness_shear: 1.0,
 };
 export const SOLVER = {
   max_iter: 5000, tol: 1e-4, damping: 1.0, kinetic_damping: true, mass_scale: 1.5, warmup_iter: 300, beam_weight: 1.0,
@@ -39,8 +39,9 @@ export const sectionArea = (s) => s.width * s.height;
 export const IxEff = (s) => (s.Ix != null ? s.Ix : s.width * s.height ** 3 / 12.0);
 export const IyEff = (s) => (s.Iy != null ? s.Iy : s.height * s.width ** 3 / 12.0);
 export const JEff = (s) => (s.J != null ? s.J : rectTorsionConstant(s.width, s.height));
+export const SHEAR_KAPPA_RECT = 5 / 6;
 export function sectionStiffness(s, m) {
-  return { EA: m.E * sectionArea(s), EIx: m.E * IxEff(s), EIy: m.E * IyEff(s), GJ: m.G * JEff(s) };
+  return { EA: m.E * sectionArea(s), EIx: m.E * IxEff(s), EIy: m.E * IyEff(s), GJ: m.G * JEff(s), GA: SHEAR_KAPPA_RECT * m.G * sectionArea(s) };
 }
 
 const clamp01 = (v) => Math.min(Math.max(+v, 0.0), 1.0);
@@ -51,8 +52,8 @@ export function beamActivations(b) {
 }
 /** stiffness multipliers keyed like sectionStiffness() */
 export function beamFactors(b) {
-  if (b.mode === 'advanced') return { EA: +b.stiffness_axial, EIx: +b.stiffness_flat, EIy: +b.stiffness_edge, GJ: +b.stiffness_twist };
-  const k = +b.stiffness; return { EA: 1.0, EIx: k, EIy: k, GJ: k };
+  if (b.mode === 'advanced') return { EA: +b.stiffness_axial, EIx: +b.stiffness_flat, EIy: +b.stiffness_edge, GJ: +b.stiffness_twist, GA: +(b.stiffness_shear ?? 1.0) };
+  const k = +b.stiffness; return { EA: 1.0, EIx: k, EIy: k, GJ: k, GA: 1.0 };
 }
 
 // --- unit conversion --------------------------------------------------------------------------------------------

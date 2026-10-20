@@ -1,4 +1,4 @@
-// Load-test protocol, in the solve strip under Run (Python: panels.py "1 Internalize"; the step is called Zero here, as
+// Load-test protocol, in the Monitor's run bar (the step is called Zero here, as
 // in zeroing the gauges before a load test). Zero takes the current (relaxed) geometry as the reference — displacement
 // and slip restart from zero, so the zigzag of the input mesh that the relaxation took out is not counted as load
 // displacement — and lets the solver settle for the given iterations, the button filling as it goes. At the end the
@@ -6,7 +6,7 @@
 // Results › delta is the load displacement alone. The drift during the settle is reported. Zero clicked while it settles
 // stops the settle. The crossings are never locked by the protocol — fastened joints are the explicit *lock all
 // crossings* box in 4 Contact (setLocked), which the chart shows as a blue *locked* band. The phases are kept as
-// iteration bands for the strip chart, in the idiom of the colour-annealing chart: grey relax, sand zero (dashed line at
+// iteration bands for the convergence chart, in the idiom of the colour-annealing chart: grey relax, sand zero (dashed line at
 // the planned end), blue locked.
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -141,7 +141,7 @@ export function initProtocol(ctx) {
     bz.disabled = !A.model;
   }
 
-  /** x window and phase bands for the strip chart. first / last: iterations of the oldest and newest history entry.
+  /** x window and phase bands for the solver charts. first / last: iterations of the oldest and newest history entry.
    *  The window keeps the latest Zero in view (with some relax before it) and reaches to the planned end. */
   function chart(first, last) {
     let start = Math.max(first, last - 3999), xmax = last;
@@ -152,6 +152,13 @@ export function initProtocol(ctx) {
       start = Math.min(start, Math.max(first, Math.floor(lastZ.i0 - Math.max(0.25 * span, 100))));
     }
     const dim = cssv('--dim'), ink = cssv('--zero'), lk = cssv('--lock'), bands = [], vlines = [];
+    if (ph) vlines.push({ x: ph.i1, color: ink });
+    else if (lastZ && lastZ.end != null) vlines.push({ x: lastZ.end, color: dim });
+    // a dashed line at the end of the axis would sit on the frame, and a lock opened at the last iteration would have no
+    // width yet: leave a little room after them
+    const pad = 0.03 * Math.max(xmax - start, 10);
+    for (const v of vlines) if (v.x > xmax - pad) xmax = v.x + pad;
+    for (const p of P.phases) if (p.kind === 'locked' && p.end == null && p.i0 > xmax - pad) xmax = p.i0 + pad;
     if (zs.length && zs[0].i0 > start) bands.push({ x0: start, x1: zs[0].i0, fill: rgba(dim, 0.1), label: 'relax', ink: dim });
     for (const p of P.phases) {
       const x1 = p.kind === 'zero' ? (p.end ?? p.i1) : (p.end ?? xmax);
@@ -159,15 +166,10 @@ export function initProtocol(ctx) {
       if (p.kind === 'zero') bands.push({ x0: p.i0, x1, fill: rgba(ink, 0.17), label: 'zero', ink });
       else bands.push({ x0: p.i0, x1, fill: rgba(lk, 0.08), label: 'locked', ink: lk });
     }
-    if (ph) vlines.push({ x: ph.i1, color: ink });
-    else if (lastZ && lastZ.end != null) vlines.push({ x: lastZ.end, color: dim });
-    // a dashed line at the end of the axis would sit on the frame: leave a little room after it
-    const pad = 0.03 * Math.max(xmax - start, 10);
-    for (const v of vlines) if (v.x > xmax - pad) xmax = v.x + pad;
     return { start, xmax, bands, vlines };
   }
 
-  /** the protocol line under the strip chart (html) */
+  /** the protocol line of the run bar (html) */
   function line() {
     if (!A.model) return '';
     const u = units(), ph = P.phase;

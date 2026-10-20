@@ -18,7 +18,7 @@
   blocks in the script at the end (labels are KaTeX placed in viewBox units). "Plain words" hides the elements with the
   classes math, eq, tech and steps, and the "Under the hood" details.
 -->
-<meta name="description" content="How WeaveSim simulates a woven kagome timber gridshell: the Cosserat and Kirchhoff rod, second-order theory, sliding contact points and reverse kinematics, section-aware contact, friction, embedment, dynamic relaxation and its safeguards — with every equation and where it lives in the code.">
+<meta name="description" content="How WeaveSim simulates a woven kagome timber gridshell: the discrete Cosserat rod, second-order theory, sliding contact points and reverse kinematics, section-aware contact, friction, embedment, dynamic relaxation and its safeguards — with every equation and where it lives in the code.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 11c8 0 16 10 24 10M4 21c8 0 16-10 24-10' fill='none' stroke='%232973c7' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M11 4c0 8 10 16 10 24' fill='none' stroke='%23b9a88c' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="vendor/katex/katex.min.css">
@@ -321,7 +321,7 @@ html[data-depth="plain"] .only-plain { display: block; }
     <li><a href="#s-loop"><span class="n">1</span>One iteration in one picture</a></li>
     <li><a href="#s-weave"><span class="n">2</span>The weave comes first</a></li>
     <li><a href="#s-rod"><span class="n">3</span>A lath is a rod with a frame</a></li>
-    <li><a href="#s-kirchhoff"><span class="n">4</span>Dropping shear: the discrete rod</a></li>
+    <li><a href="#s-rod-discrete"><span class="n">4</span>The discrete rod</a></li>
     <li><a href="#s-second"><span class="n">5</span>Second-order theory</a></li>
     <li><a href="#s-crossing"><span class="n">6</span>Two bookmarks that slide</a></li>
     <li><a href="#s-reverse"><span class="n">7</span>Reverse kinematics</a></li>
@@ -346,7 +346,7 @@ html[data-depth="plain"] .only-plain { display: block; }
   </figure>
   <h1 id="h-title">From rod to weave</h1>
   <p class="lede">How WeaveSim turns timber laths, their crossings and the friction between them into equations a computer can relax — the rod model, the geometry of a crossing, the solver, and the safeguards that keep it honest.</p>
-  <p class="who">WeaveSim is the simulation tool of the Kagome Architectures project at the Royal Danish Academy (Chair for Biohybrid Architecture), developed by You-Wen Ji. This page describes the solver in <code>web/js/solver_cpu.js</code> and its WebGPU twin as of 17 October 2026.</p>
+  <p class="who">WeaveSim is the simulation tool of the Kagome Architectures project at the Royal Danish Academy (Chair for Biohybrid Architecture), developed by You-Wen Ji. This page describes the solver in <code>web/js/solver_cpu.js</code> and <code>web/js/rod_cosserat.js</code>, and its WebGPU twin, as of 20 October 2026.</p>
   <div class="howto">
     <span class="q">Two depths</span>
     <p><em>Plain words</em> keeps the story and the pictures. <em>Full math</em> adds every equation, numbered, with the place in the code where it lives and an <em>Under the hood</em> note for reviewers. Switch at the top of the page at any time.</p>
@@ -372,10 +372,10 @@ html[data-depth="plain"] .only-plain { display: block; }
   </div>
   <figure class="scene" id="fig-loop">
     <div class="stage"><svg viewBox="0 0 960 400" role="img" aria-label="The solver loop: node positions and frames, forward kinematics to the contact points, contact laws, reverse kinematics back to the nodes, and a dynamic-relaxation step."></svg></div>
-    <figcaption><b>The loop.</b> Positions and frames go <em>forward</em> to the contact points; the contact laws produce forces there; the forces go <em>back</em> to the nodes and frames; dynamic relaxation moves them. The rod's own stiffness acts on the nodes directly. Each box is a section below.</figcaption>
+    <figcaption><b>The loop.</b> Positions and frames go <em>forward</em> to the contact points; the contact laws produce forces there; the forces go <em>back</em> to the nodes and frames; dynamic relaxation moves them. The rod's own stiffness acts on the nodes and frames directly. Each box is a section below.</figcaption>
   </figure>
   <div class="col tech">
-    <p>In the code, one pass of the iteration loop in <code>CpuSolver.step(n)</code> is one turn of this loop (the app calls it ten iterations at a time). <code>ActiveBeam.apply</code> adds the rod forces and torques (§3–§5); <code>PolylineContact.apply</code> evaluates both laths at every crossing (§6), applies the contact, friction and seat laws (§8–§10) and distributes the result back to nodes and segment frames (§7); the integrator (§11) moves the nodes, spins the frames and applies kinetic damping. The safeguards of §12–§13 sit inside these steps, not around them.</p>
+    <p>In the code, one pass of the iteration loop in <code>CpuSolver.step(n)</code> is one turn of this loop (the app calls it ten iterations at a time). <code>CosseratRod.apply</code> (<code>rod_cosserat.js</code>) adds the rod forces and torques (§3–§5); <code>PolylineContact.apply</code> evaluates both laths at every crossing (§6), applies the contact, friction and seat laws (§8–§10) and distributes the result back to nodes and segment frames (§7); the integrator (§11) moves the nodes, turns the frames about their three axes and applies kinetic damping. The safeguards of §12–§13 sit inside these steps, not around them.</p>
   </div>
 </section>
 
@@ -429,7 +429,7 @@ html[data-depth="plain"] .only-plain { display: block; }
   <div class="col math">
     <p>A Cosserat rod is a centreline $\mathbf r(s)$ and a director frame $R(s) = [\,\cX{\mathbf X}\;\cY{\mathbf Y}\;\cZ{\mathbf Z}\,]$ that may rotate independently of it. Its strains are the stretch and shear of the centreline seen in the frame, and the rate at which the frame turns:</p>
   </div>
-  <div class="eq" id="eq-cosserat-strain" data-where="theory (Antman 2005); not discretised directly"><script type="math/tex">\boldsymbol\Gamma = R^{\top}\mathbf r' - \mathbf e_3 = (\gamma_1,\ \gamma_2,\ \varepsilon), \qquad \boldsymbol\Omega = \operatorname{axial}\!\big(R^{\top}R'\big) = (\cX{\kappa_1},\ \cY{\kappa_2},\ \cZ{\tau})</script></div>
+  <div class="eq" id="eq-cosserat-strain" data-where="theory (Antman 2005); discretised in §4"><script type="math/tex">\boldsymbol\Gamma = R^{\top}\mathbf r' - \mathbf e_3 = (\gamma_1,\ \gamma_2,\ \varepsilon), \qquad \boldsymbol\Omega = \operatorname{axial}\!\big(R^{\top}R'\big) = (\cX{\kappa_1},\ \cY{\kappa_2},\ \cZ{\tau})</script></div>
   <div class="col math"><p>For a linear-elastic section the strain energy is a sum of six quadratic terms — stretch, two shears, two bendings and twist — measured from a rest state $\boldsymbol\Omega^0$:</p></div>
   <div class="eq" id="eq-cosserat-energy" data-where="theory; discretised in §4"><script type="math/tex">\begin{aligned} E = \frac12\int_0^L \Big[\, &EA\,\varepsilon^2 + GA_s(\gamma_1^2+\gamma_2^2) \\ &+ EI_x(\cX{\kappa_1}-\kappa_1^0)^2 + EI_y(\cY{\kappa_2}-\kappa_2^0)^2 \\ &+ GJ(\cZ{\tau}-\tau^0)^2 \,\Big]\,ds \end{aligned}</script></div>
   <div class="col math"><p>and the rod is in equilibrium when force and moment balance along it, with $\mathbf n$ and $\mathbf m$ the internal force and moment and $\mathbf f$, $\mathbf l$ the external loads per length:</p></div>
@@ -440,44 +440,71 @@ html[data-depth="plain"] .only-plain { display: block; }
   </div>
   <details class="uth"><summary>Under the hood</summary>
     <ul>
-      <li>Naming. In August, the Grasshopper beam was described to Prof. Williams as “a discrete Cosserat-type rod, implemented as a projection rather than from a strain-energy functional”. WeaveSim now <em>is</em> derived from an energy (eq. <a class="eqref" href="#eq-discrete-energy"></a>), but it is the unshearable special case — a Kirchhoff rod — for the reason given in §4.</li>
-      <li>Section properties: <code>params.js</code> (<code>IxEff</code>, <code>IyEff</code>, <code>JEff</code>, <code>rectTorsionConstant</code>). Lath groups (hybrid weaves) give every strand its own $EA, EI_x, EI_y, GJ$ (<code>strandStiffness</code> in <code>model.js</code>).</li>
+      <li>Naming. In August, the Grasshopper beam was described to Prof. Williams as “a discrete Cosserat-type rod, implemented as a projection rather than from a strain-energy functional”. WeaveSim's rod now <em>is</em> a discrete Cosserat rod, derived from a strain energy (eqs. <a class="eqref" href="#eq-cos-strain"></a> and <a class="eqref" href="#eq-cos-bend"></a> in §4): stretch, two shears, two bendings and twist, with forces and torques that are its exact gradient.</li>
+      <li>Section properties: <code>params.js</code> (<code>IxEff</code>, <code>IyEff</code>, <code>JEff</code>, <code>rectTorsionConstant</code>; <code>sectionStiffness</code> adds the shear stiffness $\kappa_sGA$ with $\kappa_s = 5/6$). Lath groups (hybrid weaves) give every strand its own $EA, \kappa_sGA, EI_x, EI_y, GJ$ (<code>strandStiffness</code> in <code>model.js</code>).</li>
       <li>Units are the scene's own (mm·N, cm·N or m·kN); stiffnesses are physical, so moments come out in N·mm when the scene is in mm.</li>
     </ul>
   </details>
 </section>
 
-<!-- ================================================================== 4 KIRCHHOFF / DISCRETE -->
-<section class="s" id="s-kirchhoff" aria-labelledby="h-kirchhoff">
-  <header><h2 class="t" id="h-kirchhoff"><span class="n">4</span>Dropping shear: the discrete rod</h2></header>
+<!-- ================================================================== 4 DISCRETE COSSERAT ROD -->
+<section class="s" id="s-rod-discrete" aria-labelledby="h-rod-discrete">
+  <header><h2 class="t" id="h-rod-discrete"><span class="n">4</span>The discrete rod: every piece its own frame</h2></header>
   <div class="col">
-    <p class="plain">Solid timber laths hardly shear: their cross-sections stay square to the lath, like the rungs of a ladder that stay square to its rails. So WeaveSim fixes every frame to its piece of lath and only lets it spin about it. The smooth lath is then cut into short straight pieces. Bending is measured at the joints between pieces by how sharply the lath turns there; twisting by how far the frame spins from one piece to the next.</p>
-    <p class="tech">Letting the shear stiffness $GA_s\to\infty$ forces $\gamma_1=\gamma_2=0$: the frame's third axis <em>is</em> the tangent, $\mathbf Z = \mathbf r'/|\mathbf r'|$. That is the Kirchhoff rod. WeaveSim keeps stretch ($EA$) but removes shear kinematically: after every iteration each segment frame is rotated by the smallest rotation that takes its $\mathbf Z$ onto the current chord (<code>ActiveBeam.alignFrames</code>). Removing it by a stiff penalty instead would put the stiffest coupling of the whole model into the time step (§11).</p>
-    <p class="tech">The price is an error where spans are short and deep. For a span between two crossings that sways (or carries a load at its middle), the shear share of the deflection is $12EI/(\kappa_sGAL^2) = 1.2\,(E/G)(d/L)^2$ for a rectangle with $\kappa_s = 5/6$: about 11 % flatwise and 43 % edgewise for 60 × 30 mm at 400 mm between crossings, 1.5 % and 9 % for the 20 × 8 mm laths at 290 mm. Where it matters, the effective stiffness $EI/(1 + 12EI/(\kappa_s G A L^2))$, with $L$ the span between crossings, is the correction.</p>
+    <p class="plain">The computer cuts the smooth lath into short straight pieces, four between two crossings unless told otherwise. Every piece carries its own set of arrows, and the arrows are free to turn: about the lath, and also a little against it. Along each piece two springs act: one resists stretching it, the other resists tipping its arrows against it — that tipping is shear. Where two pieces meet, the computer measures how far the arrows of one are turned against those of the other, as one true angle about one axis: turned about the width, the lath bends flatwise; about the thickness, edgewise; about the lath itself, it twists. Stretch, shear, bending and twist all come from one stored energy, and every push and twist the rod hands out is that energy running downhill.</p>
+    <p class="tech">Each segment $j$, from node $a$ to node $b$ with rest length $l_j^0$, carries a full rotation $\mathbf R_j$ (a unit quaternion $q_j$) that is not tied to its chord: a discrete Cosserat rod of the Simo–Reissner kind. Its strain is the chord seen in its own frame — the discrete $\boldsymbol\Gamma$ of eq. <a class="eqref" href="#eq-cosserat-strain"></a> — and its energy the stretch and shear terms of eq. <a class="eqref" href="#eq-cosserat-energy"></a>, with the shear area $A_s = \kappa_sA$ of a solid rectangle, $\kappa_s = 5/6$:</p>
   </div>
-  <div class="col math"><p>The discrete rod follows Bergou et al. (2008). At node $i$, with incoming edge $\mathbf a = \mathbf x_i - \mathbf x_{i-1}$, outgoing edge $\mathbf b = \mathbf x_{i+1}-\mathbf x_i$ and turning angle $\phi_i$ between them, the <em>curvature binormal</em> is</p></div>
-  <div class="eq" id="eq-kb" data-where="solver_cpu.js · ActiveBeam.curv"><script type="math/tex">(\kappa\mathbf b)_i = \frac{2\,\mathbf a\times\mathbf b}{|\mathbf a|\,|\mathbf b| + \mathbf a\cdot\mathbf b}, \qquad |(\kappa\mathbf b)_i| = 2\tan\frac{\phi_i}{2}</script></div>
+  <div class="eq" id="eq-cos-strain" data-where="rod_cosserat.js · CosseratRod.apply (segments)"><script type="math/tex">\boldsymbol\sigma_j = \frac{\mathbf R_j^{\mathsf T}(\mathbf x_b-\mathbf x_a)}{l_j^0} - \mathbf e_3,\qquad E_s = \sum_j \frac{l_j^0}{2}\,\boldsymbol\sigma_j^{\mathsf T}\,\mathrm{diag}(\kappa_s GA,\ \kappa_s GA,\ EA)\,\boldsymbol\sigma_j</script></div>
+  <div class="col tech">
+    <p>$\sigma_1, \sigma_2$ are the shear strains along the width and the normal, $\sigma_3$ the stretch. The segment force $\mathbf n_j = \mathbf R_j\,\mathrm{diag}(\kappa_sGA,\ \kappa_sGA,\ EA)\,\boldsymbol\sigma_j$ acts as $+\mathbf n_j$ on node $a$ and $-\mathbf n_j$ on node $b$, and as the torque $(\mathbf x_b-\mathbf x_a)\times\mathbf n_j$ on the segment's frame: the discrete $\mathbf r'\times\mathbf n$ of eq. <a class="eqref" href="#eq-balance"></a>. At a joint $i$ between segments $a$ and $b$, with the Voronoi length $\bar l_i$ (half of each segment), the relative rotation of the two frames is a rotation vector — axis times angle — in the material axes; divided by $\bar l_i$ it is the discrete $\boldsymbol\Omega$, flatwise and edgewise curvature and twist:</p>
+  </div>
+  <div class="eq" id="eq-cos-bend" data-where="rod_cosserat.js · relRotation, CosseratRod.apply (joints)"><script type="math/tex">\cQ{\boldsymbol\Psi_i} = \log\!\big(\mathbf R_a^{\mathsf T}\mathbf R_b\big),\qquad E_b = \sum_i \frac{\bar l_i}{2}\,(\boldsymbol\Psi_i/\bar l_i - \boldsymbol\Omega^0_i)^{\mathsf T}\,\mathrm{diag}(EI_x,\ EI_y,\ GJ)\,(\boldsymbol\Psi_i/\bar l_i - \boldsymbol\Omega^0_i)</script></div>
+  <div class="col tech">
+    <p>$\Psi_1, \Psi_2$ are the flatwise and edgewise bending angles, $\Psi_3$ the twist. The length of $\boldsymbol\Psi_i$ is the true angle between the two frames, $\theta = 2\operatorname{atan2}(|\mathbf v|, w)$ for the relative quaternion $(w, \mathbf v) = q_a^{*}\otimes q_b$ taken with $w \ge 0$, so the measure grows steadily all the way to 180°. For two frames that sit on their chords and are not twisted against each other, $\theta$ is simply the turning angle $\phi$ of the chords:</p>
+  </div>
   <figure class="scene" id="fig-dcurv">
-    <div class="stage"><svg viewBox="0 0 960 380" role="img" aria-label="Three nodes of a lath; drag the middle node. The turning angle and the curvature binormal update; a plot compares three ways of measuring the angle."></svg></div>
-    <figcaption><b>Drag the middle node.</b> The lath turns by $\phi$ at the node. Left: the two edges and the turning angle. Right: energy against angle for three ways of measuring a rotation — WeaveSim's $2\tan(\phi/2)$ for bending and the true angle (atan2) for twist both grow all the way to 180°; a sine-based measure, used in an early Grasshopper beam, has a false minimum at 180°, so a lath twisted past 90° would happily keep going.</figcaption>
+    <div class="stage"><svg viewBox="0 0 960 380" role="img" aria-label="Three nodes of a lath; drag the middle node. The turning angle and the joint's rotation vector update; a plot compares three ways of measuring the angle."></svg></div>
+    <figcaption><b>Drag the middle node.</b> The lath turns by $\phi$ at the joint. Left: the two segments, the turning angle and the joint's rotation vector $\boldsymbol\Psi_i$, pointing out of or into the screen; with the frames on their chords, as drawn, its length is the true angle, $|\boldsymbol\Psi_i| = \phi$. Right: energy against angle for three ways of measuring a rotation. WeaveSim's true angle (<span class="cQ">purple</span>) grows steadily all the way to 180°. $2\tan(\phi/2)$ (<span class="cS">green</span>), the curvature binormal of the earlier shear-free rod (Bergou et al. 2008), grows too, faster and without bound towards 180°. A sine-based measure (dashed), used in an early Grasshopper beam, has a false minimum at 180°, so a lath twisted past 90° would happily keep going.</figcaption>
   </figure>
-  <div class="col math"><p>Its components in the material frame give the two curvatures, and the twist is the angle $\psi_i$ between the width axis of the incoming segment, parallel-transported onto the outgoing chord, and the width axis of the outgoing segment; $\bar l_i$ is the Voronoi length of the node (half of each adjacent segment):</p></div>
-  <div class="eq" id="eq-curvatures" data-where="solver_cpu.js · ActiveBeam.apply, ActiveBeam.twist"><script type="math/tex">\cX{\kappa_1} = \frac{(\kappa\mathbf b)_i\cdot\mathbf m_1}{\bar l_i},\qquad \cY{\kappa_2} = \frac{(\kappa\mathbf b)_i\cdot\mathbf m_2}{\bar l_i},\qquad \cZ{\tau_i} = \frac{\psi_i}{\bar l_i},\qquad \psi_i = \operatorname{atan2}\!\big((P\mathbf X_a\times\mathbf X_b)\cdot\mathbf Z_b,\ P\mathbf X_a\cdot\mathbf X_b\big)</script></div>
-  <div class="col math"><p>with $\mathbf m_1, \mathbf m_2$ the normalised averages of the two segments' $\mathbf X$ and $\mathbf Y$ axes and $P$ the minimal rotation taking chord $\mathbf a$ to chord $\mathbf b$. The total rod energy is then a sum over joints and segments:</p></div>
-  <div class="eq" id="eq-discrete-energy" data-where="solver_cpu.js · ActiveBeam.apply"><script type="math/tex">\begin{aligned} E_{\text{rod}} = \sum_i \frac{\bar l_i}{2}\Big[\, &EI_x(\cX{\kappa_1}-\kappa_1^0)^2 + EI_y(\cY{\kappa_2}-\kappa_2^0)^2 \\ &+ GJ(\cZ{\tau_i}-\tau_i^0)^2 \,\Big] + \sum_j \frac{EA}{2}\,\frac{(l_j-l_j^0)^2}{l_j^0} \end{aligned}</script></div>
+  <div class="col tech">
+    <p>The forces and torques are the exact gradient of $E_s + E_b$ (finite differences agree to $10^{-10}$, <code>web/tests/rod_check.mjs</code>). With $\mathbf m = \mathrm{diag}(EI_x, EI_y, GJ)(\boldsymbol\Psi_i/\bar l_i - \boldsymbol\Omega^0_i)$, the moment conjugate to $\boldsymbol\Psi_i$, the joint torque on the two frames is</p>
+  </div>
+  <div class="eq" id="eq-cos-torque" data-where="rod_cosserat.js · CosseratRod.apply (joints, clamp joints)"><script type="math/tex">\cQ{\boldsymbol\tau_a} = -\cQ{\boldsymbol\tau_b} = \mathbf R_a\Big(\mathbf m + \tfrac12\,\boldsymbol\Psi\times\mathbf m + \beta\,\boldsymbol\Psi\times(\boldsymbol\Psi\times\mathbf m)\Big),\qquad \beta = \frac{1}{\theta^2} - \frac{1+\cos\theta}{2\theta\sin\theta}</script></div>
+  <div class="col tech">
+    <p>The bracket is $J_l^{-\mathsf T}(\boldsymbol\Psi)\,\mathbf m$, with $J_l$ the left Jacobian of the rotation group: it turns the moment conjugate to $\boldsymbol\Psi$ into the torque that turns the frames, exactly at any angle ($\beta \to 1/12$ as $\theta \to 0$). For a section with $EI_x \ne EI_y$, $\mathbf m$ is not parallel to $\boldsymbol\Psi$, and $\tfrac12\boldsymbol\Psi\times\mathbf m$ is the <em>roll moment</em> of anisotropic bending: a lath bent off its principal axes is turned about its own axis, so a lath bent about its strong axis can roll sideways and buckle — lateral–torsional buckling. Rotation anchors (rX, rY, rZ) are <em>clamp joints</em>: a joint between the segment's frame and a copy of it frozen when the goals are built, with half a segment of Voronoi length and only the stiffness of the anchored axes (rX → $EI_x$, rY → $EI_y$, rZ → $GJ$).</p>
+  </div>
   <div class="col">
     <p class="plain">A woven lath can be stored in two very different ways. Bent cold, it wants to spring back straight, and all the curvature of the weave is stored energy pressing the laths together. Steamed and dried in place, it has taken the woven shape as its own and stores nothing. WeaveSim has one dial between the two, the <em>activation</em>.</p>
   </div>
-  <div class="eq" id="eq-activation" data-where="solver_cpu.js · ActiveBeam (Omega0); params.js · beamActivations"><script type="math/tex">\boldsymbol\Omega^0 = (1-a)\,\boldsymbol\Omega_{\text{as-built}} \qquad \text{per component (flatwise, edgewise, twist)}, \qquad a = 1:\ \text{straight rest state}, \qquad a = 0:\ \text{woven shape is stress-free}</script></div>
+  <div class="eq" id="eq-activation" data-where="rod_cosserat.js · CosseratRod (Omega0), CosseratRod.asBuilt; params.js · beamActivations"><script type="math/tex">\boldsymbol\Omega^0 = (1-a)\,\boldsymbol\Omega_{\text{as-built}} \qquad \text{per component (flatwise, edgewise, twist)}, \qquad a = 1:\ \text{straight rest state}, \qquad a = 0:\ \text{woven shape is stress-free}</script></div>
   <div class="col tech">
-    <p>At $a = 1$ the lath's zero-energy state is straight and untwisted, as in SOFiSTiK's active-bending (ACTB) approach, so the whole woven curvature is prestress. At $a = 0$ the as-built geometry is the rest state, as for a steam-set lath. In between, a share $a$ of the woven curvature is stored. The same parameter carries creep: a relaxation ratio $R(t)$ measured on the material enters as $a(t) = a_0R(t)$, a sequence of equilibria rather than a time integrator.</p>
+    <p>At $a = 1$ the lath's zero-energy state is straight and untwisted, as in SOFiSTiK's active-bending (ACTB) approach, so the whole woven curvature is prestress. At $a = 0$ the as-built geometry is the rest state, as for a steam-set lath. In between, a share $a$ of the woven curvature is stored. $\boldsymbol\Omega_{\text{as-built}}$ is the joint rotation $\boldsymbol\Psi_i/\bar l_i$ of the reference frames $q_j^0$, the frames of the woven start (<code>CosseratRod.asBuilt</code>); those frames sit on their chords, so the start carries no shear either. The same parameter carries creep: a relaxation ratio $R(t)$ measured on the material enters as $a(t) = a_0R(t)$, a sequence of equilibria rather than a time integrator.</p>
   </div>
+  <div class="col">
+    <h3>What shear and roll add</h3>
+    <p class="plain">Tipping a section against its lath is shear: the lath deflects a little more than bending alone predicts, most in short, deep spans. And because the turn of a section enters the bending energy, a lath bent about its strong axis can roll sideways and buckle — lateral–torsional buckling. A rod that keeps every section square to its lath and lets it only spin about it, as WeaveSim's earlier rod did, misses both.</p>
+    <p class="tech">For a span between two crossings that sways (or carries a load at its middle), the shear deflection is $12EI/(\kappa_sGAL^2) = 1.2\,(E/G)(d/L)^2$ of the bending deflection for a rectangle with $\kappa_s = 5/6$: about 11 % flatwise and 43 % edgewise for 60 × 30 mm at 400 mm between crossings, 1.5 % and 9 % for the 20 × 8 mm laths at 290 mm. The discrete rod carries this itself — no effective stiffness to correct by hand — and at little cost in speed: for timber $\kappa_sG/E = 0.052$, so $\kappa_sGA$ is about 5 % of $EA$ and the axial spring still sets the masses (§11).</p>
+    <p class="tech">The shear-free rod is the limit $\kappa_sGA \to \infty$: $\gamma_1 = \gamma_2 = 0$, and the frame's third axis is the tangent, $\mathbf Z = \mathbf r'/|\mathbf r'|$. That is the Kirchhoff rod, and WeaveSim's earlier rod was of this kind (frames slaved to their chords, bending from the curvature binormal of Bergou et al. 2008). The discrete rod recovers it: in the advanced beam mode with <code>beam.stiffness_shear</code> = 10⁴, the short cantilever below lands within 0.12 % of the shear-free deflection — a check rather than a setting, since so stiff a shear spring then sets the masses and the relaxation crawls. Checks (<code>web/tests/rod_bench.mjs</code>, <code>stability_check.mjs</code>), 60 × 30 mm unless noted:</p>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Case</th><th>Reference</th><th>WeaveSim (Cosserat)</th></tr></thead>
+      <tbody>
+        <tr><td>cantilever 1 m, 10 / 20 / 40 segments</td><td>$FL^3/3EI + FL/\kappa_sGA$</td><td>+0.5 / +0.12 / +0.03 %, flatwise and edgewise</td></tr>
+        <tr><td>short cantilever 200 mm, edgewise</td><td>Timoshenko (30 % shear)</td><td>+0.09 %</td></tr>
+        <tr><td>beam-column, $P/P_E$ up to 0.95</td><td>$w_I/(1-P/P_{cr})$, Haringx for shear</td><td>0.4–0.9 %</td></tr>
+        <tr><td>lateral–torsional buckling, strip 60 × 6 mm, 1 m</td><td>$P_{cr} = 4.013\sqrt{EI_zGJ}/L^2$ with the pre-buckling correction: 21.1 N</td><td>21.0 N (−0.4 %), where the stability check of §11 crosses zero</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col tech"><p class="note">The earlier shear-free rod missed the shear entirely (−30 % on the short cantilever) and, without the roll moment, never buckled sideways.</p></div>
   <details class="uth"><summary>Under the hood</summary>
     <ul>
-      <li>Node forces are the exact gradient of eq. <a class="eqref" href="#eq-discrete-energy"></a> with the segment frames held fixed: bending acts on the three nodes of each joint, twist on the two segment frames as $\pm M_t\mathbf Z$. Two terms of the full discrete-rod gradient (Bergou et al. 2008) are not applied: the roll moment of anisotropic bending, $-\partial E_{\text{bend}}/\partial\theta$ (non-zero whenever $EI_x\ne EI_y$ and the lath bends off its principal axes), and the twist–bending forces $\pm M_t(\kappa\mathbf b)/(2l)$ that arise because the frames follow their chords. A section's roll is therefore set by twist and contact torques only; the rod has no lateral–torsional coupling (§14).</li>
-      <li>Validation (README, ARCHITECTURE §5): cantilever $L = 1000$ mm, $F = 10$ N flatwise gives 2.48 mm against $FL^3/3EI_x = 2.47$ mm for 10–40 segments; the edgewise case uses $I_y$; torsion is exact; the moment diagram is exact.</li>
-      <li>Clamped ends (rX/rY anchors) are boundary joints against the frozen chord with half a segment of Voronoi length (<code>ActiveBeam.setClamps</code>).</li>
-      <li>Grasshopper history: the <code>ActiveBeam</code> goal measured rotations by sine projection until v2.1 (28 September), which created false energy minima beyond 90° of relative twist; it was changed to true angles (atan2), the measure WeaveSim uses throughout.</li>
+      <li>The rod is <code>web/js/rod_cosserat.js</code>: <code>CosseratRod.apply</code> adds the segment springs, the joints and the clamp joints (forces on the nodes, world torques on the segment frames) and splits the energy into stretch, shear, bending and torsion for the energy chart; <code>relRotation</code> forms $\boldsymbol\Psi$ and $\theta$ from the relative quaternion; <code>CosseratRod.setClamps</code> builds the clamp joints from the rotation anchors and <code>CosseratRod.asBuilt</code> the as-built curvature. The CPU f64 reference and the WebGPU f32 solver run the same rod.</li>
+      <li>Iteration: every segment torque, rod and contact, is integrated on a body-axis angular velocity per segment with an inertia per axis (§11); there is no chord alignment and no torque split (§7).</li>
+      <li>Clamps: freezing the segment's rotation instead of a half-segment joint would lose half a segment of bending at the support (−14 % on the 10-segment cantilever).</li>
+      <li>$\kappa_s = 5/6$ (<code>SHEAR_KAPPA_RECT</code> in <code>params.js</code>); the factor <em>κGA ×</em> of the advanced beam mode (<code>beam.stiffness_shear</code>) scales $\kappa_sGA$. Crossings: $F_n$ = load/2 as with the earlier rod, and the domes relax in about the same number of iterations. Scenes that still carry the old <code>solver.rod</code> key load unchanged; the key is ignored.</li>
+      <li>Grasshopper history: the <code>ActiveBeam</code> goal measured rotations by sine projection until v2.1 (28 September), which created false energy minima beyond 90° of relative twist; it was changed to true angles (atan2). WeaveSim measures every rotation as a true angle: the joint rotation vector for bending and twist, atan2 for the scissor angle of §9.</li>
     </ul>
   </details>
 </section>
@@ -529,18 +556,18 @@ html[data-depth="plain"] .only-plain { display: block; }
       <tbody>
         <tr><td>First</td><td>the undeformed lath</td><td>small</td><td>its limit at small loads: the cantilever check $FL^3/3EI$</td></tr>
         <tr><td>Second</td><td>the deformed lath</td><td>small, $\sin\theta\approx\theta$</td><td>contained: the beam-column and P-Δ effects</td></tr>
-        <tr><td>Geometrically exact (“third order”)</td><td>the deformed lath</td><td>large</td><td>what the solver does: large rotations, nothing linearised; the rod's bending–roll and twist–bending couplings are not included (§4)</td></tr>
+        <tr><td>Geometrically exact (“third order”)</td><td>the deformed lath</td><td>large</td><td>what the solver does: large rotations, nothing linearised, shear included, and the couplings of bending, roll and twist that follow from the rod's energy (§4)</td></tr>
       </tbody>
     </table>
   </div>
   <div class="col tech">
-    <p>The discrete rod has no separate geometric-stiffness term to forget. The stretch force $N_j = EA(l_j-l_j^0)/l_j^0$ acts along the <em>current</em> chord, the bending forces come from the <em>current</em> turning angles, and the torque split of §7 converts moments into node forces on the current chord — so $\mathbf r'\times\mathbf n$ is evaluated on the current geometry at every iteration (the twist–bending couplings of §4 aside). This is also why a bending-active arch in WeaveSim can snap through under load (try it in §11): a first-order model cannot.</p>
+    <p>The discrete rod has no separate geometric-stiffness term to forget. The segment force $\mathbf n_j$ of §4 is formed from the <em>current</em> chord seen in the <em>current</em> frame, and the joint torques from the <em>current</em> relative rotations. The moment balance $\mathbf m' + \mathbf r'\times\mathbf n = \mathbf 0$ is the balance of each segment frame: the torques of its two joints against the torque $(\mathbf x_b-\mathbf x_a)\times\mathbf n_j$ of its own shear and stretch spring, on the current chord. So $\mathbf r'\times\mathbf n$ is evaluated on the current geometry at every iteration, with nothing left out. This is also why a bending-active arch in WeaveSim can snap through under load (try it in §11): a first-order model cannot.</p>
   </div>
   <details class="uth"><summary>Under the hood</summary>
     <ul>
       <li>Sign convention: $N>0$ in tension, $q$ the transverse load per length. For $w = \hat w\sin(\pi x/L)$ the beam-column equation gives $\hat w\,[EI(\pi/L)^4 + N(\pi/L)^2] = \hat q$, which is eq. <a class="eqref" href="#eq-amplify"></a>.</li>
       <li>Terminology follows the German “Theorie II. Ordnung” used in SOFiSTiK and Eurocode practice; SOFiSTiK calls the large-rotation analysis “third order”.</li>
-      <li>A reproducible check for reviewers: a pinned–pinned lath, 20 segments, a sine-shaped lateral load and an end load $P$; the midspan deflection should follow eq. <a class="eqref" href="#eq-amplify"></a> for $P/P_{cr}\lesssim 0.8$. This case is not yet in <code>web/tests</code>.</li>
+      <li>A reproducible check for reviewers: a pinned–pinned lath, 20 segments, a sine-shaped lateral load and an end load $P$; the midspan deflection should follow eq. <a class="eqref" href="#eq-amplify"></a> with the two shear terms of a shear-flexible lath: the first-order deflection grows by the factor $1 + P_E/\kappa_sGA$, and $P_{cr}$ is the Haringx load $\kappa_sGA(\sqrt{1+4P_E/\kappa_sGA}-1)/2$ ($0.986\,P_E$ for 60 × 30 mm at 1 m), with $P_E = \pi^2EI/L^2$. It is <code>node web/tests/rod_bench.mjs beamcol</code>: 0.4 % at $P = 0$ (the lumped sine load on 20 segments), 0.5 / 0.9 / 0.9 % at $P/P_E$ = 0.5 / 0.8 / 0.95 and 0.4 % in tension.</li>
     </ul>
   </details>
 </section>
@@ -586,13 +613,13 @@ html[data-depth="plain"] .only-plain { display: block; }
 <section class="s" id="s-reverse" aria-labelledby="h-reverse">
   <header><h2 class="t" id="h-reverse"><span class="n">7</span>Reverse kinematics: handing the push back</h2></header>
   <div class="col">
-    <p class="plain">The push between two laths is worked out at the bookmark, but the computer can only move nodes and turn frames. So the push is handed back to the two nodes on either side of the bookmark, in proportion to how close it is — like two people carrying a plank: whoever stands nearer to the load carries more of it. And because the push acts at the surface of the lath, not on its centreline, it also tries to roll the lath. That roll goes to the frame of the piece of lath that carries the bookmark.</p>
+    <p class="plain">The push between two laths is worked out at the bookmark, but the computer can only move nodes and turn frames. So the push is handed back to the two nodes on either side of the bookmark, in proportion to how close it is — like two people carrying a plank: whoever stands nearer to the load carries more of it. And because the push acts at the surface of the lath, not on its centreline, it also tries to turn the lath, mostly rolling it about its own length. That turn goes to the frame of the piece of lath that carries the bookmark.</p>
     <p class="tech">Forward, the contact point and its frame are functions of the neighbouring nodes and frames (eqs. <a class="eqref" href="#eq-hermite"></a> and <a class="eqref" href="#eq-frame-u"></a>). Reverse, a force $\mathbf F$ acting at the section's support point $\mathbf P + \mathbf r$ (§8) does virtual work on those degrees of freedom; reading the work off term by term gives the generalised forces — the transpose of the forward map:</p>
   </div>
   <div class="eq" id="eq-virtual-work" data-where="principle; linear part exact"><script type="math/tex">\begin{aligned} \delta W &= \cF{\mathbf F}\cdot\delta(\mathbf P + \mathbf r) \\ &\approx \cF{\mathbf F}\cdot\big[(1-t)\,\delta\mathbf x_i + t\,\delta\mathbf x_{i+1}\big] + (\mathbf r\times\cF{\mathbf F})\cdot\delta\boldsymbol\theta_j \end{aligned}</script></div>
   <div class="eq" id="eq-shares" data-where="solver_cpu.js · PolylineContact.apply (distribute)"><script type="math/tex">\mathbf f_i = (1-t)\,\cF{\mathbf F}, \qquad \mathbf f_{i+1} = t\,\cF{\mathbf F}, \qquad \cQ{\boldsymbol\tau_j} = t_f\,(\mathbf r\times\cF{\mathbf F})</script></div>
   <figure class="scene" id="fig-reverse">
-    <div class="stage"><svg viewBox="0 0 960 470" role="img" aria-label="One segment of lath A between nodes i and i plus one, with the contact point, the contact force at the section surface, its two node shares, the lever torque and its split into twist and a bending couple."></svg></div>
+    <div class="stage"><svg viewBox="0 0 960 470" role="img" aria-label="One segment of lath A between nodes i and i plus one, with the contact point, the contact force at the section surface, its two node shares, and the lever torque on the segment's frame: its roll part about the lath and, with friction along the lath, its part about an axis across the lath."></svg></div>
     <div class="ctl">
       <label class="r"><span>bookmark $t$</span><input type="range" id="rv-t" min="0" max="1" step="0.005" value="0.333" style="--c:var(--A)"><output id="rv-to"></output></label>
       <label class="r"><span>roll of A $\varphi$</span><input type="range" id="rv-phi" min="-6" max="6" step="0.05" value="2.5" style="--c:var(--Q)"><output id="rv-phio"></output></label>
@@ -601,26 +628,26 @@ html[data-depth="plain"] .only-plain { display: block; }
       <label class="chk"><input type="checkbox" id="rv-pin0"> pin node $i$</label>
       <label class="chk"><input type="checkbox" id="rv-pin1"> pin node $i{+}1$</label>
     </div>
-    <figcaption><b>One segment of <span class="cA">lath A</span>, with <span class="cB">lath B</span> resting on it.</b> The <span class="cF">contact force</span> acts at the support point on A's surface; its shares at the nodes are $(1-t)$ and $t$ of it. The lever $\mathbf r\times\mathbf F$ (<span class="cQ">purple</span>) splits into a twist about the lath and a bending couple on the two nodes. The gauge on the right is the free weight of eq. <a class="eqref" href="#eq-freeweight"></a>. At $t = 1/3$: the nearer node carries two thirds.</figcaption>
+    <figcaption><b>One segment of <span class="cA">lath A</span>, with <span class="cB">lath B</span> resting on it.</b> The <span class="cF">contact force</span> acts at the support point on A's surface; its shares at the nodes are $(1-t)$ and $t$ of it. The lever torque $t_f\,\mathbf r\times\mathbf F$ (<span class="cQ">purple</span>) goes to the segment's frame whole: the arc around the lath is its roll part $\tau_Z$; with friction along the lath, the second arc, about an axis across the lath, is the part $\boldsymbol\tau_\perp$ that turns the frame against its chord, which the shear spring and the joints carry into bending. The gauge on the right is the free weight of eq. <a class="eqref" href="#eq-freeweight"></a>. At $t = 1/3$: the nearer node carries two thirds.</figcaption>
   </figure>
   <div class="col tech">
-    <p>A torque on a segment can only partly be a rotation of its frame — the frame is slaved to the chord (§4). The integrator therefore splits every segment torque into a twist about the chord and a couple of node forces that bends the chord, using the current chord $\mathbf t_j$ and length $l_j$:</p>
+    <p>The torque goes to the frame of segment $j$ whole. A segment frame is a rotation in its own right, free about all three of its axes (§4), so the lever term of eq. <a class="eqref" href="#eq-virtual-work"></a> needs no conversion: the solver takes the torque into the frame's own axes, $\mathbf R_j^{\mathsf T}\boldsymbol\tau_j$, and turns the frame (§11). Its part about the lath rolls the section. Its part across the lath turns the frame against its chord; the shear spring that ties frame and chord answers with the forces $\pm\mathbf n_j$ on the two nodes, and the joints to the neighbouring frames answer with bending moments — so the lath bends. Nothing is split off by hand: at equilibrium the torques on every frame balance,</p>
   </div>
-  <div class="eq" id="eq-split" data-where="solver_cpu.js · CpuSolver.step (torque split)"><script type="math/tex">\cQ{\tau_{\parallel}} = \cQ{\boldsymbol\tau}\cdot\mathbf t_j \ \ \text{(twist)}, \qquad \mathbf f_{j,1} = +\frac{\cQ{\boldsymbol\tau}\times\mathbf t_j}{l_j},\quad \mathbf f_{j,0} = -\frac{\cQ{\boldsymbol\tau}\times\mathbf t_j}{l_j} \ \ \text{(couple)}</script></div>
+  <div class="eq" id="eq-frame-torque" data-where="solver_cpu.js · PolylineContact.apply (lever torques), CpuSolver.step; rod_cosserat.js · CosseratRod.apply"><script type="math/tex">\cQ{\mathbf T_j} = t_f\,(\mathbf r\times\cF{\mathbf F}) + (\mathbf x_b-\mathbf x_a)\times\mathbf n_j + \sum_{\text{joints, clamps}}\cQ{\boldsymbol\tau}, \qquad \cQ{\mathbf T_j} = \mathbf 0 \ \text{ at equilibrium}</script></div>
   <div class="col tech">
-    <p>The couple's moment is $l_j\,\mathbf t_j\times(\boldsymbol\tau\times\mathbf t_j)/l_j = \boldsymbol\tau_\perp$, so nothing is lost. In the picture: a section rolled onto its edge gets a <em>righting twist</em> from the normal force; friction across the lath twists it too (the lever $h/2$), while friction along the lath bends it.</p>
+    <p>with the joint torques of eq. <a class="eqref" href="#eq-cos-torque"></a> (and the scissor torque of §9 where it is on). In the picture: a section rolled onto its edge gets a <em>righting roll</em> from the normal force; friction across the lath rolls it too (the lever $h/2$), while friction along the lath turns the frame about an axis across the lath, and so bends it.</p>
     <p>A worked example, from the September design notes. A contact sits between knot 1 and knot 2, at distances 2 and 4 from them, so $t = 1/3$. The shares are $(1-t, t) = (2/3, 1/3)$: the nearer knot takes more — a 4 : 2 split, not 2 : 4 as first written. Getting it backwards produces a subtle instability: sliding towards a knot would <em>reduce</em> that knot's response.</p>
     <p>The same weights answer a second question: how much of the contact point's motion can the free nodes actually produce? For the linear part, $\delta\mathbf P = (1-t)\delta\mathbf x_i + t\,\delta\mathbf x_{i+1}$, and a node fixed by an anchor contributes nothing:</p>
   </div>
   <div class="eq" id="eq-freeweight" data-where="solver_cpu.js · PolylineContact.freeWeight, AL_FREE_MIN = 0.25"><script type="math/tex">w_{\text{free}} = (1-t)^2\,[\,\mathbf x_i\ \text{free}\,] + t^2\,[\,\mathbf x_{i+1}\ \text{free}\,], \qquad w_{\text{free}} \lt 0.25 \text{ on either lath} \qquad \Rightarrow\; \text{support-controlled crossing}</script></div>
   <div class="col tech">
-    <p>A support-controlled crossing cannot close its own gap — the support decides it — so it is excluded from the augmented-Lagrangian update of §12. The same nodes also carry the crossing's stiffness for the solver: $k_n + k_t$ is added to the fictitious masses of both nodes of the contact segment, and the seat's righting stiffness $k_\theta$ to the segment's twist inertia (§11).</p>
+    <p>A support-controlled crossing cannot close its own gap — the support decides it — so it is excluded from the augmented-Lagrangian update of §12. The same nodes also carry the crossing's stiffness for the solver: $k_n + k_t$ is added to the fictitious masses of both nodes of the contact segment, and the seat's righting stiffness $k_\theta$ to the rotational inertia of the segment's frame, about all three of its axes (§11).</p>
   </div>
   <details class="uth"><summary>Under the hood — what is exact and what is approximate</summary>
     <ul>
-      <li>For linear interpolation, $(1-t,\ t)$ is the exact transpose of $\partial\mathbf P/\partial\mathbf x$. With the Hermite position of eq. <a class="eqref" href="#eq-hermite"></a> the exact gradient would also load the node tangents (and through them nodes $i-1$ and $i+2$), and the nlerp frame would spread the lever torque over the neighbouring segments. WeaveSim keeps the simple weights; the error is of the order of the Hermite correction and harmless at four segments per span. Two-lath validation: $F_n$ = load / 2, moments $PL/4$, deflection $PL^3/48EI$; stick carries the pull exactly; slip sits at $\mu F_n$ with $u$ advancing (ARCHITECTURE §5).</li>
+      <li>For linear interpolation, $(1-t,\ t)$ is the exact transpose of $\partial\mathbf P/\partial\mathbf x$. With the Hermite position of eq. <a class="eqref" href="#eq-hermite"></a> the exact gradient would also load the node tangents (and through them nodes $i-1$ and $i+2$), and the nlerp frame would spread the lever torque over the neighbouring segments. WeaveSim keeps the simple weights; the error is of the order of the Hermite correction and harmless at four segments per span. Two-lath validation (ARCHITECTURE §5, repeated with the discrete Cosserat rod): $F_n$ = load / 2, moments $PL/4$, deflection $PL^3/48EI$ plus the shear term $PL/4\kappa_sGA$ (within 2 % on ten segments); stick carries the pull exactly; slip sits at $\mu F_n$ with $u$ advancing.</li>
       <li>The lever arm $\mathbf r$ is the tanh-smoothed support point of eq. <a class="eqref" href="#eq-support-point"></a>; $t_f$ = <code>contact.torsion_factor</code> (default 1, a calibration knob).</li>
-      <li>The torque split happens once per iteration for all goals, in <code>CpuSolver.step</code>, before the anchors take their reactions (which therefore include the couples); fixed twist DOFs then zero $\tau_\parallel$.</li>
+      <li>The lever torques are added to the rod's torques on each segment frame (world vectors, <code>T</code>) and taken into the frame's body axes once per iteration, in <code>CpuSolver.step</code>; no torque is split into node forces. Rotation anchors do not zero them: they act through the clamp joints of the rod (§4).</li>
     </ul>
   </details>
 </section>
@@ -689,13 +716,13 @@ html[data-depth="plain"] .only-plain { display: block; }
     <p>Friction also resists the laths rotating against each other in the plane of the crossing, like scissors. This is optional (<code>rot_friction</code>, review item W2) and uses the same stick–slip logic on the scissor angle:</p>
   </div>
   <div class="eq" id="eq-scissor" data-where="solver_cpu.js · PolylineContact._rotationalFriction"><script type="math/tex">\cQ{\theta} = \operatorname{atan2}\!\big((\cA{\mathbf t_A}\times\cB{\mathbf t_B})\cdot\cN{\mathbf n},\ \cA{\mathbf t_A}\cdot\cB{\mathbf t_B}\big), \qquad M = k_r(\cQ{\theta} - \theta_0), \quad k_r = k_t\,r_{eq}^2, \qquad |M| \le \beta_r\,\mu\,\cF{F_n}\,r_{eq}</script></div>
-  <div class="col tech"><p>with $r_{eq} = 0.38\sqrt{A}$ for a face-to-face patch of area $A$ (about 24 mm for 60 × 30 mm at 60°) and $\ell/4$ for a line contact; the torque $\pm M\mathbf n$ goes to the two segments and, being perpendicular to the chords, becomes in-plane bending through eq. <a class="eqref" href="#eq-split"></a>. It matters in structures that shear in their surface: columns in compression, skip weaves.</p></div>
+  <div class="col tech"><p>with $r_{eq} = 0.38\sqrt{A}$ for a face-to-face patch of area $A$ (about 24 mm for 60 × 30 mm at 60°) and $\ell/4$ for a line contact; the torque $\pm M\mathbf n$ goes to the two segment frames; being perpendicular to the chords, it turns them in the plane of the crossing, and the shear springs and joints carry it into in-plane bending (eq. <a class="eqref" href="#eq-frame-torque"></a>). It matters in structures that shear in their surface: columns in compression, skip weaves.</p></div>
   <details class="uth"><summary>Under the hood</summary>
     <ul>
       <li>$k_t$ = <code>contact.stick_strength</code> (a converged penalty, like $k_n$); $\mu$ = <code>contact.mu</code> (prior 0.35 for dry planed hardwood, search bounds 0.15–0.65, to be measured by a double-lap shear test on the Mecmesin OmniTest); $r_s$ = <code>slip_rate</code> (1 = full return; below 1 a viscous regularisation for chattering replays); $\epsilon$ = <code>contact.epsilon</code> (15 mm: the largest slide per iteration).</li>
       <li>The tangential offset is decomposed in the plane of the two tangents; if they are nearly parallel ($\det \lt 10^{-8}$) the offset cannot be split, so the crossing cannot slide that iteration — the stick spring still acts.</li>
       <li>The model is the <code>FloorFriction</code> pattern of Daniel Piker's Kangaroo goal (<code>friction.cs</code>): a stuck target dragged along when the spring exceeds the limit. In the Grasshopper <code>PolylineContact</code> v3 (September) the same logic needed three fixes — slip measured per lath against the current contact point, the Coulomb cap scaled with the stick stiffness, and anchor hysteresis through a brief separation. WeaveSim instead lets a separated crossing track its closest points, so a reopened contact starts without a stale anchor.</li>
-      <li>W2: $\theta_0$ is set when a crossing first carries load; $k_{r,\max}/l_0^2$ is added to the node masses, not to the twist inertia (it is not a twist).</li>
+      <li>W2: $\theta_0$ is set when a crossing first carries load; $k_{r,\max}/l_0^2$ is added to the masses of the contact segment's nodes (<code>PolylineContact.addStiffness</code>), not to the frames' inertia.</li>
     </ul>
   </details>
 </section>
@@ -748,14 +775,14 @@ html[data-depth="plain"] .only-plain { display: block; }
   <header><h2 class="t" id="h-dr"><span class="n">11</span>Dynamic relaxation: letting the weave settle</h2></header>
   <div class="col">
     <p class="plain">There is no formula for the shape of a whole woven shell. Instead the computer lets it move: every node gets a pretend mass and is pushed by the forces on it, like a marble rolling in a bowl. Left alone, the marble would roll back and forth for ever. The trick, due to Michael Barnes, is to watch the total speed: the moment it starts to fall, the marble has just passed the bottom of its swing — so stop it dead there and let it go again. After a few dozen such restarts it sits at the bottom. That is equilibrium.</p>
-    <p class="tech">The rod and contact forces derive from stated energies and the solver follows their negative gradient, with the omissions noted in §4 (rod couplings), §7 (Hermite weights) and §8 (smoothed lever); friction, the seat law and the multiplier update are non-conservative by design. With $\boldsymbol\theta_j$ the rotation of segment frame $j$:</p>
+    <p class="tech">The rod and contact forces derive from stated energies and the solver follows their negative gradient, with the omissions noted in §7 (Hermite weights) and §8 (smoothed lever); friction, the seat law and the multiplier update are non-conservative by design. With $E_s$ and $E_b$ the rod's stretch-and-shear and bending-and-twist energies (eqs. <a class="eqref" href="#eq-cos-strain"></a> and <a class="eqref" href="#eq-cos-bend"></a>) and $\boldsymbol\theta_j$ a small rotation of segment frame $j$:</p>
   </div>
-  <div class="eq" id="eq-energy" data-where="solver_cpu.js · ActiveBeam.apply, PolylineContact.apply, Loads"><script type="math/tex">E = E_{\text{stretch}} + E_{\text{bend}} + E_{\text{twist}} + E_{\text{contact}} - \sum_i \mathbf f_i\cdot\mathbf x_i, \qquad \mathbf F_i = -\frac{\partial E}{\partial\mathbf x_i}, \qquad \cQ{\mathbf T_j} = -\frac{\partial E}{\partial\boldsymbol\theta_j}</script></div>
-  <div class="col tech"><p>The masses are fictitious: each node weighs a multiple $m_s$ of the sum of all stiffnesses that touch it, each segment frame the same multiple of its rotational stiffnesses — including the seat's righting stiffness, which depends on the current contact force and is recomputed every iteration:</p></div>
-  <div class="eq" id="eq-mass" data-where="solver_cpu.js · CpuSolver._buildGoals, addStiffness, addTwistStiffness"><script type="math/tex">\cS{m_i} = m_s \sum_k k_{ik} \qquad \Big(\tfrac{EA}{l},\ \tfrac{4\max(EI_x,\,EI_y)}{\bar l^3},\ k_n + k_t,\ \tfrac{k_{\text{seg}}}{l^2},\ \dots\Big), \qquad \cS{I_j} = m_s\Big(\sum\tfrac{GJ}{\bar l} + k_\theta(\cF{F_n})\Big), \qquad k_\theta = t_f\Big[\big(\cF{F_n} + \tfrac{k_nh}{4}\big)\frac{w/2}{\varepsilon} + k_t\big(\tfrac h2\big)^2\Big]</script></div>
-  <div class="col tech"><p>One iteration takes a unit time step, $\Delta t = 1$: velocities and twist rates are kicked by the forces and torques (the twist rate clipped, §12), positions and frames are moved, and the frames are re-aligned with their chords:</p></div>
-  <div class="eq" id="eq-step" data-where="solver_cpu.js · CpuSolver.step"><script type="math/tex">\mathbf v_i \leftarrow \mathbf v_i + \frac{\mathbf F_i}{\cS{m_i}},\quad \mathbf x_i \leftarrow \mathbf x_i + \mathbf v_i, \qquad \cQ{\omega_j} \leftarrow \operatorname{clip}\!\Big(\cQ{\omega_j} + \frac{\cQ{T_{\parallel j}}}{\cS{I_j}},\ \pm\omega_{\max}\Big), \qquad q_j \leftarrow \exp(\cQ{\omega_j}\,\mathbf t_j)\otimes q_j</script></div>
-  <div class="eq" id="eq-kd" data-where="solver_cpu.js · CpuSolver.step (kinetic damping)"><script type="math/tex">\cS{K} = \tfrac12\sum_i \cS{m_i}|\mathbf v_i|^2 + \tfrac12\sum_j \cS{I_j}\,\cQ{\omega_j}^2, \qquad \cS{K}^{(k)} \lt \cS{K}^{(k-1)} \qquad \Rightarrow\; \mathbf x \leftarrow \mathbf x^{(k-1)},\ \ q \leftarrow q^{(k-1)},\ \ \mathbf v = \cQ{\omega} = 0</script></div>
+  <div class="eq" id="eq-energy" data-where="rod_cosserat.js · CosseratRod.apply; solver_cpu.js · PolylineContact.apply; model.js · Loads"><script type="math/tex">E = E_s + E_b + E_{\text{contact}} - \sum_i \mathbf f_i\cdot\mathbf x_i, \qquad \mathbf F_i = -\frac{\partial E}{\partial\mathbf x_i}, \qquad \cQ{\mathbf T_j} = -\frac{\partial E}{\partial\boldsymbol\theta_j}</script></div>
+  <div class="col tech"><p>The masses are fictitious: each node weighs a multiple $m_s$ of the sum of all stiffnesses that touch it. Each segment frame has an inertia about each of its three axes, the same multiple of its rotational stiffnesses about that axis — its joints, the shear spring's resistance to tilting, and the seat's righting stiffness, which depends on the current contact force and is recomputed every iteration:</p></div>
+  <div class="eq" id="eq-mass" data-where="solver_cpu.js · CpuSolver._buildGoals, CpuSolver.step, addTwistStiffness; rod_cosserat.js · addStiffness, addRotStiffness"><script type="math/tex">\cS{m_i} = m_s \sum_k k_{ik} \quad \Big(\tfrac{EA + \kappa_sGA}{l^0},\ k_n + k_t,\ \tfrac{k_r}{(l^0)^2}\Big), \qquad \cS{I_{j,\alpha}} = m_s\Big(\sum\tfrac{B_\alpha}{\bar l} + \Big[\kappa_sGA\,\tfrac{l_j^2}{l_j^0}\Big]_{\alpha = X,\,Y} + k_\theta(\cF{F_n})\Big), \qquad k_\theta = t_f\Big[\big(\cF{F_n} + \tfrac{k_nh}{4}\big)\frac{w/2}{\varepsilon} + k_t\big(\tfrac h2\big)^2\Big]</script></div>
+  <div class="col tech"><p>Here $B_\alpha$ is $EI_x$, $EI_y$, $GJ$ for $\alpha = X, Y, Z$, summed over the segment's joints and clamp joints (a clamp with $\bar l = l^0/2$), and $k_r$ is the scissor stiffness of §9, when it is on. One iteration takes a unit time step, $\Delta t = 1$: node velocities are kicked by the forces; each frame's angular velocity, about its own three axes, by its torque taken into those axes and divided by its inertia $\cS{\mathbf I_j} = \mathrm{diag}(I_{j,X}, I_{j,Y}, I_{j,Z})$, with the roll rate clipped (§12); then positions and frames move:</p></div>
+  <div class="eq" id="eq-step" data-where="solver_cpu.js · CpuSolver.step"><script type="math/tex">\mathbf v_i \leftarrow \mathbf v_i + \frac{\mathbf F_i}{\cS{m_i}},\quad \mathbf x_i \leftarrow \mathbf x_i + \mathbf v_i, \qquad \cQ{\boldsymbol\omega_j} \leftarrow \cQ{\boldsymbol\omega_j} + \cS{\mathbf I_j}^{-1}\,\mathbf R_j^{\mathsf T}\cQ{\mathbf T_j}, \qquad \cQ{\omega_{j,Z}} \leftarrow \operatorname{clip}(\cQ{\omega_{j,Z}},\ \pm\omega_{\max}), \qquad q_j \leftarrow q_j\otimes\exp(\cQ{\boldsymbol\omega_j}) \ \ \text{(normalised)}</script></div>
+  <div class="eq" id="eq-kd" data-where="solver_cpu.js · CpuSolver.step (kinetic damping)"><script type="math/tex">\cS{K} = \tfrac12\sum_i \cS{m_i}|\mathbf v_i|^2 + \tfrac12\sum_j\sum_{\alpha} \cS{I_{j,\alpha}}\,\cQ{\omega_{j,\alpha}}^2, \qquad \cS{K}^{(k)} \lt \cS{K}^{(k-1)} \qquad \Rightarrow\; \mathbf x \leftarrow \mathbf x^{(k-1)},\ \ q \leftarrow q^{(k-1)},\ \ \mathbf v = \cQ{\boldsymbol\omega} = \mathbf 0</script></div>
   <figure class="scene" id="fig-dr">
     <div class="stage"><svg viewBox="0 0 960 420" role="img" aria-label="A live dynamic relaxation: a lath with both ends pinned and pushed together settles into an arch. A plot shows the kinetic energy with the kinetic-damping resets."></svg></div>
     <div class="ctl">
@@ -765,15 +792,15 @@ html[data-depth="plain"] .only-plain { display: block; }
       <label class="r"><span>mass factor $m_s$</span><input type="range" id="dr-ms" min="0.3" max="3" step="0.05" value="1.5" style="--c:var(--S)"><output id="dr-mso"></output></label>
       <label class="r"><span>load</span><input type="range" id="dr-f" min="0" max="2.5" step="0.05" value="0.5" style="--c:var(--ink-strong)"><output id="dr-fo"></output></label>
     </div>
-    <figcaption><b>Relaxing a bending-active arch, live.</b> A straight lath of 20 segments, its ends pushed 15 % closer and pinned, with a load at midspan; the solver uses exactly the step and the kinetic damping above (on a planar rod, forces by finite differences). Ticks on the <span class="cS">kinetic-energy</span> trace are the resets. Things to try: switch kinetic damping off (it never settles); lower the mass factor below about 0.6 (the step becomes unstable); raise the load past about 1.5 (the arch snaps through — a geometrically nonlinear effect).</figcaption>
+    <figcaption><b>Relaxing a bending-active arch, live.</b> A straight lath of 20 segments, its ends pushed 15 % closer and pinned, with a load at midspan; the figure uses the node step and the kinetic damping above, on a planar rod with node positions only — no frames, no shear — and forces by finite differences. Ticks on the <span class="cS">kinetic-energy</span> trace are the resets. Things to try: switch kinetic damping off (it never settles); lower the mass factor below about 0.6 (the step becomes unstable); raise the load past about 1.5 (the arch snaps through — a geometrically nonlinear effect).</figcaption>
   </figure>
   <div class="col tech">
-    <p>Why the step is stable. For a network of springs, choosing every mass as $m_s$ times the sum of the stiffnesses at the node bounds the highest frequency by Gershgorin's theorem, $\omega_{\max}^2 \le 2/m_s$; the explicit step with $\Delta t = 1$ is stable while $\omega_{\max} \lt 2$, i.e. for $m_s \gt \tfrac12$ — Barnes' classic $m = \tfrac12\Delta t^2\sum k$ sits exactly on that line. Bending, contact and twist enter only through equivalent stiffnesses ($4\max(EI_x, EI_y)/\bar l^3$, $k_n+k_t$, $k_\theta$), so WeaveSim keeps a margin: $m_s = 1.5$. The price is speed. The masses are set by the stiffest term, the axial $EA/l$ — 1.4 × 10⁵ N/mm per node for 60 × 30 mm laths in 250 mm segments — while the bending modes that shape a shell have stiffnesses of the order of 50 N/mm, so they converge slowly; a 10⁴ N/mm contact penalty adds another 10–15 % to the nodes next to a crossing.</p>
-    <p>When to stop. The relative unbalanced force must fall below the tolerance; it is a force criterion, not a movement threshold:</p>
+    <p>Why the step is stable. For a network of springs, choosing every mass as $m_s$ times the sum of the stiffnesses at the node bounds the highest frequency by Gershgorin's theorem, $\omega_{\max}^2 \le 2/m_s$; the explicit step with $\Delta t = 1$ is stable while $\omega_{\max} \lt 2$, i.e. for $m_s \gt \tfrac12$ — Barnes' classic $m = \tfrac12\Delta t^2\sum k$ sits exactly on that line. The frames are treated alike, but bending and twist ($B_\alpha/\bar l$), the tilt of a frame against its chord ($\kappa_sGA\,l^2/l^0$), contact ($k_n+k_t$) and the seat ($k_\theta$) enter only through such equivalent stiffnesses, and the shear spring couples nodes and frames, so WeaveSim keeps a margin: $m_s = 1.5$. The price is speed. The node masses are set by the stiffest term, the axial and shear spring $(EA + \kappa_sGA)/l^0$ — 1.5 × 10⁵ N/mm per node for 60 × 30 mm laths in 250 mm segments, 95 % of it axial — while the bending modes that shape a shell have stiffnesses of the order of 50 N/mm, so they converge slowly; a 10⁴ N/mm contact penalty adds another 10–15 % to the nodes next to a crossing.</p>
+    <p>When to stop. The relative unbalanced force on the free nodes, and the unbalanced torque on the frames, must fall below the tolerance; it is a force criterion, not a movement threshold:</p>
   </div>
-  <div class="eq" id="eq-resid" data-where="solver_cpu.js · CpuSolver.step, forceRef"><script type="math/tex">r = \frac{\max_{\text{free } i}|\mathbf F_i|}{F_{\text{ref}}} \le 10^{-4}, \qquad F_{\text{ref}} = \max\big(|\mathbf f|,\ |N|,\ |M|/\bar l_{\min},\ \cF{F_n}\big)</script></div>
+  <div class="eq" id="eq-resid" data-where="solver_cpu.js · CpuSolver.step, forceRef"><script type="math/tex">r = \max\Big(\frac{\max_{\text{free } i}|\mathbf F_i|}{F_{\text{ref}}},\ \frac{\max_j|\cQ{\mathbf T_j}|}{F_{\text{ref}}\,l_{\min}}\Big) \le 10^{-4}, \qquad F_{\text{ref}} = \max\big(|\mathbf f|,\ |N|,\ |M|/\bar l_{\min},\ \cF{F_n}\big)</script></div>
   <div class="col tech">
-    <p>On woven structures the residual typically plateaus at 10⁻² to 10⁻¹ (up to 0.7 in the force calibration example, README): stick–slip switching is non-smooth, so a few crossings keep toggling once the shape has settled. Treat a flat strain-energy trace as converged; a regularised friction law is the known next improvement.</p>
+    <p>Here $l_{\min}$ is the shortest segment or joint length, so a torque counts like the force that would make it over that length. On woven structures the residual typically plateaus at 10⁻² to 10⁻¹ (up to 0.7 in the force calibration example, README): stick–slip switching is non-smooth, so a few crossings keep toggling once the shape has settled. Treat a flat strain-energy trace as converged; a regularised friction law is the known next improvement.</p>
     <p>Kangaroo 2, the Grasshopper solver the project started in, is built on projective dynamics: each goal projects its particles onto its own constraint and the solver moves every particle to the weighted average of the projections, $\mathbf x_i \leftarrow \mathbf x_i + \sum_g w_g\mathbf m_{g,i}/\sum_g w_g$. For a linear spring of stiffness $k$ towards a target, WeaveSim's position update is $\sum k(\mathbf p-\mathbf x)/(m_s\sum k)$ — the same Jacobi step at $m_s = 1$ with $w = k$. The differences are elsewhere:</p>
   </div>
   <div class="tbl tech">
@@ -781,21 +808,29 @@ html[data-depth="plain"] .only-plain { display: block; }
       <thead><tr><th>Aspect</th><th>Kangaroo 2 (Grasshopper goals)</th><th>WeaveSim</th></tr></thead>
       <tbody>
         <tr><td>Weights</td><td>dimensionless strengths; translation and rotation weights mixed</td><td>physical $EA$, $EI$, $GJ$, penalties in force/length — results come out in N and N·mm</td></tr>
-        <tr><td>Goal output</td><td>projections (need not be the gradient of an energy)</td><td>$-\nabla E$ of stated energies (the omissions are noted in §4, §7 and §8)</td></tr>
+        <tr><td>Goal output</td><td>projections (need not be the gradient of an energy)</td><td>$-\nabla E$ of stated energies (the omissions are noted in §7 and §8)</td></tr>
         <tr><td>Damping</td><td>momentum with a constant factor</td><td>Barnes kinetic damping (peak reset)</td></tr>
         <tr><td>Stop</td><td>total movement below a threshold</td><td>relative unbalanced force</td></tr>
-        <tr><td>Rotations</td><td>orientation planes on particles, small-angle torque averages</td><td>frames on segments; bending torques become node couples, twist is integrated on the frame</td></tr>
+        <tr><td>Rotations</td><td>orientation planes on particles, small-angle torque averages</td><td>a full frame per segment, turned about its three axes by the torques; bending and shear reach the nodes through the rod's own springs</td></tr>
       </tbody>
     </table>
   </div>
   <details class="uth"><summary>Under the hood</summary>
     <ul>
-      <li>One iteration: forces and torques from all goals → torque split (§7) → anchors take reactions and zero fixed DOFs → twist inertia from the current $F_n$ → integrate → re-align frames → kinetic damping → augmented-Lagrangian update every <code>al_every</code> iterations after the ramp → residual. <code>damping</code> (a viscous factor, default 1 = none) is available but unused by default.</li>
-      <li>Two start-up devices: the contact penalty ramps from 1 % to 100 % over <code>ramp_iter</code> = 1500 iterations, and for the first <code>warmup_iter</code> = 300 iterations positions are frozen so that the section frames can roll into their seats before anything translates.</li>
-      <li>The WebGPU solver runs the same iteration as six dispatches, for B instances of one topology at once (a calibration batch). WebGPU has no 64-bit floats, so positions, frames, contact parameters and all force sums are 64-bit fixed point; sums are exact and independent of thread order, so a run is bit-for-bit reproducible on a given GPU (§12).</li>
+      <li>One iteration: rod forces and torques (segments, joints, clamp joints) → loads → contacts (forces on the nodes, lever torques on the frames) → anchors take reactions and zero the fixed translations (rotation anchors act through the clamp joints) → torques into the body axes, $\mathbf R_j^{\mathsf T}\mathbf T_j$ → frame inertia from the current $F_n$ → integrate, with the roll-rate limit → kinetic damping → augmented-Lagrangian update every <code>al_every</code> iterations after the ramp → residual. <code>damping</code> (a viscous factor on $\mathbf v$ and $\boldsymbol\omega$, default 1 = none) is available but unused by default.</li>
+      <li>Two start-up devices: the contact penalty ramps from 1 % to 100 % over <code>ramp_iter</code> = 1500 iterations, and for the first <code>warmup_iter</code> = 300 iterations positions are frozen so that the section frames can turn into their seats before anything translates.</li>
+      <li>The WebGPU solver runs the same iteration, with the same Cosserat rod, as four dispatches (<code>wgsl.js</code>), for B instances of one topology at once (a calibration batch). WebGPU has no 64-bit floats, so positions, frames, contact parameters and all force and torque sums are 64-bit fixed point; sums are exact and independent of thread order, so a run is bit-for-bit reproducible on a given GPU (§12).</li>
       <li>The relation to Kangaroo was the subject of the August meeting notes for Prof. Williams: the equilibria are genuine force balances in both, but the path between them is pseudo-time, which matters for friction because friction is path-dependent.</li>
     </ul>
   </details>
+  <div class="col">
+    <h3>How far from buckling: the stability check</h3>
+    <p class="plain">A relaxed state can be an equilibrium and still be about to give way — a dome before it snaps through, a lath before it rolls over. The <em>Stability</em> group of the Monitor, beside the 3-D view (<em>Check now</em>, or <em>after every run</em>), measures how stiff the softest way of deforming the whole model is: as a load approaches buckling, that stiffness falls towards zero; below zero the state is unstable.</p>
+  </div>
+  <div class="eq" id="eq-stability" data-where="stability.js · stability"><script type="math/tex">\mathbf K = -\frac{\partial\mathbf g}{\partial\mathbf q},\qquad \mathbf A = \mathbf M^{-1/2}\,\tfrac12(\mathbf K+\mathbf K^{\mathsf T})\,\mathbf M^{-1/2},\qquad \lambda_0 = \text{eigenvalue of }\mathbf A\text{ nearest } 0</script></div>
+  <div class="col">
+    <p class="tech">$\mathbf g$ are the solver's generalised forces (rod, contact with its stick–slip return mapping and multipliers frozen at the current state, loads), $\mathbf q$ the free degrees of freedom — the free node translations and the three body-axis rotations of every segment frame — and $\mathbf M$ the relaxation masses and inertias, so $\lambda$ is the squared frequency of the relaxation dynamics. $\mathbf K$ is assembled from central differences of $\mathbf g$ with a distance-2 colouring of the stencil (under a hundred force evaluations for a single lath, about 1100 for the 80-face dome), $\mathbf A$ is factorised as $\mathbf L\mathbf D\mathbf L^{\mathsf T}$ on a nested-dissection ordering, the number of negative pivots is the number of unstable modes (Sylvester's law of inertia) and inverse iteration gives $\lambda_0$. Checks (<code>web/tests/stability_check.mjs</code>): an Euler column gives $\lambda_0/\lambda_0(P{=}0)$ = 0.49 / 0.086 / −0.12 at $P/P_E$ = 0.5 / 0.9 / 1.1, close to the line $1 - P/P_{cr}$ with the Haringx load $P_{cr} = 0.986\,P_E$ of the shear-flexible column (§5), and one unstable mode above it; the lateral–torsional strip of §4 crosses zero at 21.0 N against 21.1 N (the earlier shear-free rod, without the roll moment, never did). On the 80-face dome (5940 degrees of freedom) it takes a few seconds.</p>
+  </div>
 </section>
 
 <!-- ================================================================== 12 SECURING -->
@@ -808,31 +843,31 @@ html[data-depth="plain"] .only-plain { display: block; }
     <table>
       <thead><tr><th>Safeguard</th><th>What it does</th><th>Why it is there</th><th class="tech">Where</th></tr></thead>
       <tbody>
-        <tr><td>Masses from stiffness</td><td>$m_i = m_s\sum k$, $m_s = 1.5$</td><td>keeps the explicit step stable however stiff a goal is (§11)</td><td class="tech"><code>_buildGoals</code></td></tr>
+        <tr><td>Masses from stiffness</td><td>$m_i = m_s\sum k$ for the nodes and, axis by axis, for the frames; $m_s = 1.5$</td><td>keeps the explicit step stable however stiff a goal is (§11)</td><td class="tech"><code>_buildGoals</code></td></tr>
         <tr><td>Kinetic damping</td><td>roll back and stop at every kinetic-energy peak</td><td>energy only falls between restarts; stiff modes cannot pump</td><td class="tech"><code>step</code></td></tr>
         <tr><td>Penalty ramp</td><td>contact stiffness from 1 % to 100 % over 1500 iterations</td><td>the woven start is not hit with full stiffness at once</td><td class="tech"><code>contact.ramp</code></td></tr>
         <tr><td>Warm-up</td><td>positions frozen for 300 iterations</td><td>sections roll into their seats before anything moves</td><td class="tech"><code>warmup_iter</code></td></tr>
-        <tr><td>Twist inertia follows $F_n$</td><td>$I_j$ recomputed every iteration with $k_\theta(F_n)$</td><td>a heavily loaded seat is stiff in roll; its frame must be heavier</td><td class="tech"><code>addTwistStiffness</code></td></tr>
-        <tr><td>Roll-rate limit</td><td>$|\omega_j| \le \varepsilon/2 = 0.86°$ per iteration</td><td>stops the corner lever's bang-bang chatter (figure below)</td><td class="tech"><code>TWIST_RATE_MAX</code></td></tr>
+        <tr><td>Frame inertia follows $F_n$</td><td>$I_{j,\alpha}$ recomputed every iteration with $k_\theta(F_n)$, about all three axes</td><td>a heavily loaded seat is stiff in roll; its frame must be heavier</td><td class="tech"><code>addTwistStiffness</code></td></tr>
+        <tr><td>Roll-rate limit</td><td>$|\omega_{j,Z}| \le \varepsilon/2 = 0.86°$ per iteration, about the frame's lath axis Z</td><td>stops the corner lever's bang-bang chatter (figure below)</td><td class="tech"><code>TWIST_RATE_MAX</code></td></tr>
         <tr><td>Slide cap</td><td>$|\Delta a|, |\Delta b| \le \epsilon$ = 15 mm per iteration</td><td>a bookmark can never jump a whole crossing in one step</td><td class="tech"><code>contact.epsilon</code></td></tr>
         <tr><td>Regularised slip</td><td>only a share $r_s$ of the excess is removed per iteration</td><td>available when free UTM replays chatter between stick and slip</td><td class="tech"><code>slip_rate</code></td></tr>
         <tr><td>Safeguarded multiplier</td><td>window-mean penetration; none at support-controlled crossings; $|\lambda|$ capped at crushing</td><td>a gap that cannot close made $\lambda$ grow for ever (figure below)</td><td class="tech"><code>alValue</code></td></tr>
-        <tr><td>True-angle measures</td><td>$2\tan(\phi/2)$ for bending, atan2 for twist and scissoring</td><td>no false energy minimum beyond 90° (§4)</td><td class="tech"><code>ActiveBeam.twist</code></td></tr>
+        <tr><td>True-angle measures</td><td>the rotation vector $\log(\mathbf R_a^{\mathsf T}\mathbf R_b)$ for bending and twist, atan2 for scissoring</td><td>no false energy minimum beyond 90° (§4)</td><td class="tech"><code>relRotation</code>, <code>_rotationalFriction</code></td></tr>
         <tr><td>Consistent start</td><td>Catmull–Rom + cosine pre-offset, frames from the crossing, stuck points at closest points</td><td>no kinks, no false penetration, no phantom friction at iteration 0</td><td class="tech"><code>topology.js</code>, <code>initialize</code></td></tr>
         <tr><td>Penalty sized to the lath</td><td>$k_n \approx$ 20–50 × $48EI_x/L^3$ of a crossing span</td><td>too stiff a penalty turns 0.1 mm of mismatch into kN</td><td class="tech"><code>contact.strength</code></td></tr>
-        <tr><td>Exact sums on the GPU</td><td>64-bit fixed point for positions, frames and force accumulation</td><td>f32 frames inject 10⁻⁷ rad of roll noise per iteration, which trips the resets and stalls convergence</td><td class="tech"><code>wgsl.js</code></td></tr>
+        <tr><td>Exact sums on the GPU</td><td>64-bit fixed point for positions, frames and the sums of forces and torques</td><td>f32 frames inject 10⁻⁷ rad of rotation noise per iteration, which trips the resets and stalls convergence</td><td class="tech"><code>wgsl.js</code></td></tr>
       </tbody>
     </table>
   </div>
   <h3 class="col">A frame that will not sit still</h3>
   <div class="col">
     <p class="plain">The push between two laths acts on the corner that touches. Within a sliver of a degree the push jumps from one corner to the other, so a section that overshoots gets kicked back just as hard — and if each step is bigger than that sliver, it overshoots again, for ever.</p>
-    <p class="tech">The smoothed support point makes the lever a bang-bang torque $\pm F_n w/2$ outside the $\pm\varepsilon$ window. The twist inertia is set from the window's stiffness, $(F_n + k_nh/4)(w/2)/\varepsilon$; once $F_n \gg k_nh/4$, as under the runaway multiplier of the thin laths, the saturated torque accelerates the frame by up to $\varepsilon/m_s\approx 1.15°$ per iteration² — it crosses most of the 3.4° window in each step and oscillates by ±3–5° indefinitely, an undamped bang-bang oscillator that the global kinetic damping does not see. Worse, the support height $D$ is convex in the roll, so a chattering section looks thicker on average and biases the penetration the multiplier feeds on.</p>
+    <p class="tech">The smoothed support point makes the lever a bang-bang torque $\pm F_n w/2$ outside the $\pm\varepsilon$ window. The frame's roll inertia, about its Z axis, is set from the window's stiffness, $(F_n + k_nh/4)(w/2)/\varepsilon$; once $F_n \gg k_nh/4$, as under the runaway multiplier of the thin laths, the saturated torque accelerates the frame by up to $\varepsilon/m_s\approx 1.15°$ per iteration² — it crosses most of the 3.4° window in each step and oscillates by ±3–5° indefinitely, an undamped bang-bang oscillator that the global kinetic damping does not see. Worse, the support height $D$ is convex in the roll, so a chattering section looks thicker on average and biases the penetration the multiplier feeds on.</p>
   </div>
   <figure class="scene narrow" id="fig-chatter">
     <div class="stage"><svg viewBox="0 0 900 340" role="img" aria-label="Roll angle of one section over 160 iterations, without and with the roll-rate limit; the support-smoothing window is shaded."></svg></div>
     <div class="ctl"><button class="btn" type="button" id="ch-play">Replay</button></div>
-    <figcaption><b>Roll of one seated section, iteration by iteration</b>, from a 4° start, no damping. Grey: without the limit, the frame jumps across the shaded ±1.7° window and settles into a ±4° limit cycle. <span class="cQ">Purple</span>: with $|\omega|\le\varepsilon/2$ the frame cannot outrun the window, stays in its linear core and is then removed by kinetic damping like any other mode.</figcaption>
+    <figcaption><b>Roll of one seated section, iteration by iteration</b>, from a 4° start, no damping. Grey: without the limit, the frame jumps across the shaded ±1.7° window and settles into a ±4° limit cycle. <span class="cQ">Purple</span>: with $|\omega_Z|\le\varepsilon/2$ the frame cannot outrun the window, stays in its linear core and is then removed by kinetic damping like any other mode.</figcaption>
   </figure>
   <h3 class="col">A push that grew for ever</h3>
   <div class="col">
@@ -847,9 +882,9 @@ html[data-depth="plain"] .only-plain { display: block; }
   <details class="uth"><summary>Under the hood</summary>
     <ul>
       <li>The diagnosis and both fixes are written up in the project note <em>WeaveSim lath flip — multiplier runaway and roll chatter (fix, 17 Oct 2026)</em>; the diagnostic is <code>node web/tests/twist_watch.mjs &lt;scene&gt; &lt;iterations&gt; &lt;every&gt;</code>.</li>
-      <li>The roll-rate limit is in all three solvers (CPU <code>solver_cpu.js</code>, GPU <code>wgsl.js</code> <code>k_segint</code>, Python <code>core.py</code>); the multiplier safeguards in CPU and GPU (the Python solver has no augmented Lagrangian). Validation cases are bit-identical with the limit; the calibration example's relaxation residual dropped about tenfold.</li>
+      <li>The roll-rate limit is in all three solvers (CPU <code>solver_cpu.js</code>, GPU <code>wgsl.js</code> <code>k_int</code>, Python <code>core.py</code>); the multiplier safeguards in CPU and GPU (the Python solver has no augmented Lagrangian). Validation cases are bit-identical with the limit; the calibration example's relaxation residual dropped about tenfold.</li>
       <li>Consequence to keep in mind: the pinned boundary crossings now act as plain penalty contacts ($F_n\approx k_np$, 50–250 N there). For an exact gap at a support, anchor the lath one node away from the crossing.</li>
-      <li>GPU precision: positions are fixed point at $2^{-P_B}$ model units (about $10^{-15}$ cm for a 2 m dome), quaternions at $2^{-60}$ updated in delta form (a frame that does not move does not change by a bit), axial strain against a per-segment reference edge so $L-l_0$ never cancels; own polynomial sin, cos, atan2 accurate to about 1 ULP (WGSL allows 2⁻¹¹ absolute error for sin and cos). Very stiff contacts leave an f32 floor of about $k\,w\cdot6\times10^{-8}$ per crossing — <em>f64 polish</em> continues on the CPU.</li>
+      <li>GPU precision: positions are fixed point at $2^{-P_B}$ model units (about $10^{-15}$ cm for a 2 m dome), quaternions at $2^{-60}$ updated in delta form (a frame that does not move does not change by a bit), every relative rotation (joint, clamp) formed from the exact difference of two fixed-point quaternions, and the segment strain taken against a per-segment reference frame and edge, so that neither stretch nor shear cancels; own polynomial sin, cos, atan2 accurate to about 1 ULP (WGSL allows 2⁻¹¹ absolute error for sin and cos). Very stiff contacts leave an f32 floor of about $k\,w\cdot6\times10^{-8}$ per crossing — <em>f64 polish</em> continues on the CPU.</li>
     </ul>
   </details>
 </section>
@@ -896,8 +931,7 @@ html[data-depth="plain"] .only-plain { display: block; }
     <p class="tech">The rule of thumb for reviewers: if an answer still depends on a converged parameter, the model has not converged — that dependence is the diagnostic, not something to fit. Calibration itself lives in the app (section 10 Calibration): UTM tests are replayed as a force-controlled cable pull with load–unload cycles, the objective compares displacements on the same branch of the same cycle, and the fit is a Latin hypercube followed by Nelder–Mead or CMA-ES. Because stick–slip makes the replay chaotic (eight replicas perturbed by 10⁻⁹ of the model size give objectives 0.13–0.21 at the synthetic truth), replicas are averaged.</p>
     <h3>Known limits</h3>
     <ul>
-      <li>No shear deformation (Kirchhoff): about 11 % flatwise and 43 % edgewise of a span's deflection for 60 × 30 mm at 400 mm between crossings, 1.5 % and 9 % for 20 × 8 mm at 290 mm (§4).</li>
-      <li>The rod omits two couplings of the full discrete-rod gradient: the roll moment of anisotropic bending and the twist–bending forces. A lath bent off its principal axes is not turned towards its weak axis by its own stiffness, so lateral–torsional effects are not captured; roll comes from twist and contact torques only (§4).</li>
+      <li>The rod as implemented (§4): section properties are constant along each segment; shear uses the coefficient $\kappa_s = 5/6$ of a solid rectangle; torsion is St Venant's ($GJ$), without warping restraint; and each frame's rotational inertia is lumped and fictitious, so it shapes only the pseudo-dynamics of the relaxation (§11), not the equilibria.</li>
       <li>The path between equilibria is pseudo-time. The equilibria are genuine, but friction is path-dependent, so the order of loading in a simulation is a modelling choice.</li>
       <li>Stick–slip switching is non-smooth: residuals plateau, typically at 10⁻² to 10⁻¹ (§11).</li>
       <li>Contact forces go back to the nodes with the linear weights $(1-t,\ t)$, an approximation of the exact transpose for the Hermite curve (§7).</li>
@@ -921,6 +955,7 @@ html[data-depth="plain"] .only-plain { display: block; }
     <li><span class="when">4 October</span><p>Crossing mechanics from the review: contact types, scissor friction, the directional seat law; the augmented-Lagrangian gap.</p></li>
     <li><span class="when">14–15 October</span><p>WeaveSim Web: the CPU f64 reference and a batched WebGPU solver in 64-bit fixed point, the calibration sandbox, the Zero → Lock protocol, public on GitHub Pages.</p></li>
     <li><span class="when">17 October</span><p>Safeguarded multipliers and the roll-rate limit, after laths flipped and passed through each other under extreme load. This page.</p></li>
+    <li><span class="when">20 October</span><p>After an external code review and discussions at the school: the Cosserat rod (shear, roll moment, lateral–torsional buckling), the stability check, and crossing histories — the friction-coefficient evolution and other quantities at chosen crossings. Later the same day the Cosserat rod became the only rod of both web solvers (the Python program keeps the shear-free rod), and the charts moved into the Monitor beside the 3-D view; the playback of the solve history was dropped, as it cost too much speed and memory.</p></li>
   </ol>
 </section>
 
@@ -933,12 +968,16 @@ html[data-depth="plain"] .only-plain { display: block; }
       <thead><tr><th>Symbol</th><th>Meaning</th><th>Default or value</th><th>In the code</th></tr></thead>
       <tbody>
         <tr><td>$\mathbf x_i,\ \mathbf v_i$</td><td>node position, velocity</td><td></td><td><code>st.X</code>, <code>st.V</code></td></tr>
-        <tr><td>$q_j,\ \omega_j$</td><td>segment frame (unit quaternion, Z = chord), twist rate per iteration</td><td></td><td><code>st.Q</code>, <code>st.Wt</code></td></tr>
+        <tr><td>$q_j,\ \boldsymbol\omega_j$</td><td>segment frame (unit quaternion; Z near the chord, not tied to it), its angular velocity per iteration in the body axes</td><td></td><td><code>st.Q</code>, <code>st.Wr</code></td></tr>
         <tr><td>$\mathbf X, \mathbf Y, \mathbf Z$</td><td>section axes: width, thickness (surface normal), tangent</td><td></td><td>frame columns</td></tr>
         <tr><td>$w,\ h$</td><td>section width, height</td><td class="num">60, 30 mm</td><td><code>section.width/height</code></td></tr>
         <tr><td>$E,\ G$</td><td>Young's and shear modulus</td><td class="num">10 000, 625 N/mm²</td><td><code>material.E/G</code></td></tr>
         <tr><td>$EI_x,\ EI_y,\ GJ$</td><td>flatwise, edgewise bending and torsional stiffness</td><td class="num">1.35e9, 5.4e9, 2.3e8 N·mm²</td><td><code>sectionStiffness</code></td></tr>
-        <tr><td>$\kappa_1,\ \kappa_2,\ \tau$</td><td>flatwise and edgewise curvature, twist</td><td></td><td><code>ActiveBeam.M</code> (moments)</td></tr>
+        <tr><td>$\kappa_s,\ \kappa_sGA$</td><td>shear coefficient of a solid rectangle, shear stiffness</td><td class="num">5/6; 9.4e5 N</td><td><code>SHEAR_KAPPA_RECT</code>, <code>beam.stiffness_shear</code></td></tr>
+        <tr><td>$\kappa_1,\ \kappa_2,\ \tau$</td><td>flatwise and edgewise curvature, twist: $\boldsymbol\Psi_i/\bar l_i$ at a joint</td><td></td><td><code>CosseratRod.M</code> (moments)</td></tr>
+        <tr><td>$\boldsymbol\sigma_j$</td><td>segment strain: shear along the width and the normal, stretch</td><td></td><td><code>CosseratRod.apply</code>; forces <code>beam.V</code>, <code>beam.N</code></td></tr>
+        <tr><td>$\boldsymbol\Psi_i,\ \theta$</td><td>joint rotation vector (material axes) and its true angle</td><td></td><td><code>relRotation</code></td></tr>
+        <tr><td>$\beta$</td><td>coefficient of the exact joint torque</td><td class="num">→ 1/12 at small angles</td><td><code>CosseratRod.apply</code></td></tr>
         <tr><td>$a$</td><td>activation: share of woven curvature stored as prestress</td><td class="num">1</td><td><code>beam.activation</code></td></tr>
         <tr><td>$u_A,\ u_B;\ i,\ t$</td><td>bookmarks on the two laths; segment and position within it</td><td></td><td><code>st.u</code></td></tr>
         <tr><td>$\mathbf n,\ g,\ D,\ p$</td><td>contact normal, normal gap, required distance, penetration</td><td></td><td><code>st.nPrev</code>, <code>gap</code></td></tr>
@@ -950,7 +989,7 @@ html[data-depth="plain"] .only-plain { display: block; }
         <tr><td>$\delta,\ \psi$</td><td>dent depth, notch wall angle</td><td></td><td><code>dent</code>, <code>tanpsi</code></td></tr>
         <tr><td>$E_{90},\ f_{c,90},\ H$</td><td>perpendicular-to-grain modulus, crushing strength, side hardness</td><td class="num">800, 8, 30 N/mm²</td><td><code>material.E90/fc90/H</code></td></tr>
         <tr><td>$m_s$</td><td>mass scale of the fictitious masses</td><td class="num">1.5</td><td><code>solver.mass_scale</code></td></tr>
-        <tr><td>$\omega_{\max}$</td><td>roll-rate limit</td><td class="num">0.015 rad ≈ 0.86°</td><td><code>TWIST_RATE_MAX</code></td></tr>
+        <tr><td>$\omega_{\max}$</td><td>roll-rate limit (body axis Z)</td><td class="num">0.015 rad ≈ 0.86°</td><td><code>TWIST_RATE_MAX</code></td></tr>
         <tr><td>tol, ramp, warm-up</td><td>residual tolerance, penalty ramp, frozen start</td><td class="num">1e-4; 1500; 300 it</td><td><code>solver.tol</code>, <code>ramp_iter</code>, <code>warmup_iter</code></td></tr>
       </tbody>
     </table>
@@ -959,13 +998,14 @@ html[data-depth="plain"] .only-plain { display: block; }
   <dl class="gloss">
     <dt>Active bending</dt><dd>Forming a structure by bending elastic members; the bending stress it leaves behind is the prestress.</dd>
     <dt>Augmented Lagrangian</dt><dd>Enforcing a constraint exactly with a moderate spring, by adding a force that is learned step by step until the gap is right.</dd>
-    <dt>Cosserat rod</dt><dd>A line that carries a rotating frame: the general model of a slender elastic body.</dd>
+    <dt>Cosserat rod</dt><dd>A line that carries a rotating frame, free to tip against the line as well as to turn with it: the general model of a slender elastic body, and WeaveSim's model of a lath.</dd>
     <dt>Coulomb friction</dt><dd>Friction proportional to how hard two surfaces press together, independent of the contact area.</dd>
     <dt>Dynamic relaxation</dt><dd>Finding the equilibrium of a structure by letting it move with pretend masses and taking the motion out.</dd>
     <dt>Embedment</dt><dd>Permanent local crushing where one piece of timber presses into another across its grain.</dd>
     <dt>Kagome</dt><dd>The triaxial weave of hexagons and triangles, named after a traditional Japanese basket pattern.</dd>
     <dt>Kinetic damping</dt><dd>Stopping all motion each time the total kinetic energy passes a peak.</dd>
-    <dt>Kirchhoff rod</dt><dd>A Cosserat rod that cannot shear: its sections stay square to the centreline.</dd>
+    <dt>Kirchhoff rod</dt><dd>A Cosserat rod that cannot shear: its sections stay square to the centreline — the limit of infinite shear stiffness.</dd>
+    <dt>Lateral–torsional buckling</dt><dd>A lath bent about its strong axis that gives way by bending sideways and rolling at the same time.</dd>
     <dt>Penalty</dt><dd>A stiff spring that enforces a constraint approximately; the stiffer, the more exact and the slower.</dd>
     <dt>Return mapping</dt><dd>After a trial step that breaks the friction limit, pulling the state back exactly onto the limit.</dd>
     <dt>Second-order theory</dt><dd>Structural analysis that writes equilibrium on the deformed shape, so axial forces change bending stiffness.</dd>
@@ -989,10 +1029,11 @@ html[data-depth="plain"] .only-plain { display: block; }
     <li>Lienhard, J., Alpermann, H., Gengnagel, C., Knippers, J. (2013). Active bending, a review on structures where bending is used as a self-formation process. <em>International Journal of Space Structures</em> 28(3–4), 187–196.</li>
     <li>Piker, D. (2013). Kangaroo: form finding with computational physics. <em>Architectural Design</em> 83(2), 136–137.</li>
     <li>Ren, Y., Panetta, J., Chen, T., Isvoranu, F., Poincloux, S., Brandt, C., Martin, A., Pauly, M. (2021). 3D weaving with curved ribbons. <em>ACM Transactions on Graphics</em> 40(4).</li>
+    <li>Simo, J. C. (1985). A finite strain beam formulation. The three-dimensional dynamic problem. Part I. <em>Computer Methods in Applied Mechanics and Engineering</em> 49(1), 55–70.</li>
     <li>Simo, J. C., Laursen, T. A. (1992). An augmented Lagrangian treatment of contact problems involving friction. <em>Computers &amp; Structures</em> 42(1), 97–116.</li>
     <li>Timoshenko, S. P., Gere, J. M. (1961). <em>Theory of Elastic Stability</em>, 2nd ed. McGraw-Hill.</li>
     <li>Wriggers, P. (2006). <em>Computational Contact Mechanics</em>, 2nd ed. Springer.</li>
-    <li>Project documents: <em>WeaveSim Solver Notes</em> (1 Oct 2026), <em>WeaveSim review improvements — contact and embedment</em> (4 Oct), <em>WeaveSim Web — WebGPU port and calibration sandbox</em> (15 Oct), <em>WeaveSim lath flip — multiplier runaway and roll chatter</em> (17 Oct); <code>WeaveSim/ARCHITECTURE.md</code>, <code>web/README.md</code>.</li>
+    <li>Project documents: <em>WeaveSim Solver Notes</em> (1 Oct 2026), <em>WeaveSim review improvements — contact and embedment</em> (4 Oct), <em>WeaveSim Web — WebGPU port and calibration sandbox</em> (15 Oct), <em>WeaveSim lath flip — multiplier runaway and roll chatter</em> (17 Oct), <em>WeaveSim Cosserat rod, stability check, Knots tab and playback</em> (20 Oct); <code>WeaveSim/ARCHITECTURE.md</code>, <code>web/README.md</code>.</li>
   </ol>
   <footer class="end">
     <p>Every equation can be copied as LaTeX with its <em>TeX</em> button. Corrections and questions are welcome as issues on <a href="https://github.com/uwenji/weave-sim/issues">github.com/uwenji/weave-sim</a>. The page is a single file, <code>web/theory.html</code>; the mathematics is typeset with KaTeX (MIT licence, in <code>web/vendor/katex</code>).</p>
@@ -1428,7 +1469,7 @@ function boot() {
 }
 
 boot();
-/* WeaveSim Theory — scenes, part 1: hero weave, the loop, the strand profile, the rod, discrete curvature,
+/* WeaveSim Theory — scenes, part 1: hero weave, the loop, the strand profile, the rod, the joint angle,
    second-order theory, the sliding bookmark. */
 
 // ================================================================================================ hero: mesh → kagome
@@ -1530,7 +1571,7 @@ scene('fig-loop', {
         law: [654, 22, 280, 128, 'F', '<span class="cF">Contact laws</span><br>gap and $F_n$ §8<br>friction $\\mathbf F_t$ §9, dents $\\delta$ §10'],
         rev: [654, 250, 280, 128, 'Q', '<span class="cQ">Reverse kinematics</span> §7<br>shares $(1-t,\\ t)$ on the nodes<br>lever $\\mathbf r\\times\\mathbf F$ on the frame'],
         step: [296, 286, 300, 92, 'S', '<span class="cS">Relaxation step</span> §11<br>$\\mathbf v \\mathrel{+}= \\mathbf F/m$, kinetic damping'],
-        rod: [296, 158, 300, 86, 'mut', 'Rod energies §3–§5<br>stretch, bending, twist'],
+        rod: [296, 158, 300, 86, 'mut', 'Rod energies §3–§5<br>stretch, shear, bending, twist'],
       },
       arrows: [['M128 156 C 150 80, 220 64, 292 66', 'ink'], ['M600 66 L 650 70', 'A'], ['M794 154 L 794 246', 'F'], ['M650 330 L 600 330', 'Q'],
         ['M292 332 C 210 330, 140 310, 128 248', 'S'], ['M230 201 L 292 201', 'mut'], ['M446 248 L 446 282', 'mut']],
@@ -1544,7 +1585,7 @@ scene('fig-loop', {
         law: [180, 226, 224, 100, 'F', '<span class="cF">Contact laws</span><br>gap and $F_n$ §8<br>friction $\\mathbf F_t$ §9<br>dents $\\delta$ §10'],
         rev: [180, 362, 224, 100, 'Q', '<span class="cQ">Reverse kinematics</span> §7<br>shares $(1-t,\\ t)$<br>on the nodes<br>lever $\\mathbf r\\times\\mathbf F$ on the frame'],
         step: [120, 520, 180, 76, 'S', '<span class="cS">Relaxation step</span> §11<br>$\\mathbf v \\mathrel{+}= \\mathbf F/m$<br>kinetic damping'],
-        rod: [38, 132, 118, 330, 'mut', 'Rod energies<br>§3–§5<br>stretch,<br>bending,<br>twist'],
+        rod: [38, 132, 118, 330, 'mut', 'Rod energies<br>§3–§5<br>stretch,<br>shear,<br>bending,<br>twist'],
       },
       arrows: [['M250 68 C 262 84, 284 92, 292 108', 'ink'], ['M292 190 L 292 222', 'A'], ['M292 326 L 292 358', 'F'], ['M292 462 C 292 490, 272 502, 256 516', 'Q'],
         ['M120 558 C 44 558, 16 540, 16 480 L 16 110 C 16 62, 44 38, 116 38', 'S'], ['M170 68 C 150 90, 110 100, 97 128', 'mut'], ['M97 462 C 97 494, 140 506, 166 516', 'mut']],
@@ -1755,7 +1796,7 @@ scene('fig-rod', {
   },
 });
 
-// ================================================================================================ discrete curvature
+// ================================================================================================ joint angle: true angle vs 2 tan(φ/2) vs sine
 scene('fig-dcurv', {
   build(s) {
     const svg = s.svg, stg = s.stage;
@@ -1772,18 +1813,20 @@ scene('fig-dcurv', {
     const binX = path(bin, '', 's-Q', 1.6);
     const lA = label(stg, 0, 0, '\\mathbf x_{i-1}', 'sm'), lB = label(stg, 0, 0, '\\mathbf x_i', 'sm'), lC = label(stg, 0, 0, '\\mathbf x_{i+1}', 'sm');
     const la = label(stg, 0, 0, '\\mathbf a', 'sm cA'), lb = label(stg, 0, 0, '\\mathbf b', 'sm cA'), lphi = label(stg, 0, 0, '\\phi', 'cQ');
-    const lkb = label(stg, 0, 0, '(\\kappa\\mathbf b)_i', 'sm cQ'), read = label(stg, 64, 350, '', 'sm l'), readB = label(stg, 64, 350, '', 'sm muted l');
+    const lpsi = label(stg, 0, 0, '\\cQ{\\boldsymbol\\Psi_i}', 'sm'), read = label(stg, 64, 350, '', 'sm l'), readB = label(stg, 64, 350, '', 'sm muted l');
     read.el.style.transform = 'translate(0, -100%)'; readB.el.style.transform = 'translate(0, 0.35em)';
     // energy-vs-angle plot (right)
     const ax = axes(svg, stg, [600, 46, 320, 262], [0, 180], [0, 6], { xticks: [0, 45, 90, 135, 180], yticks: [0, 2, 4, 6], xfmt: v => v + '°', xlabel: 'angle $\\phi$', ylabel: 'energy, in units of $\\tfrac12 k$' });
     const curve = (f, cls, w = 2) => { const pts = []; for (let a = 0; a <= 180; a += 1) { const v = f(a * deg); if (v <= 6.4) pts.push([ax.fx(a), ax.fy(Math.min(v, 6))]); } return path(svg, poly(pts), cls, w); };
-    const cT = curve(a => (2 * Math.tan(a / 2)) ** 2, 's-Q'), cS = curve(a => a * a, 's-S'), cN = curve(a => Math.sin(a) ** 2, 's-mut dash', 1.6);
+    // WeaveSim's measure, the true angle θ = |Ψ| (= φ for frames on their chords), is the accent; 2 tan(φ/2) is the
+    // curvature binormal of the earlier shear-free rod; the sine measure has the false minimum
+    const cTan = curve(a => (2 * Math.tan(a / 2)) ** 2, 's-S', 1.8), cTrue = curve(a => a * a, 's-Q', 2.4), cN = curve(a => Math.sin(a) ** 2, 's-mut dash', 1.6);
     const fm = circle(svg, ax.fx(180), ax.fy(0), 4.5, 'f-mut');
-    label(stg, ax.fx(88), ax.fy(4.4), '(2\\tan\\tfrac{\\phi}{2})^2', 'sm cQ r');
-    label(stg, ax.fx(148), ax.fy(5.3), '\\phi^2', 'sm cS');
+    label(stg, ax.fx(88), ax.fy(4.4), '\\cS{(2\\tan\\tfrac{\\phi}{2})^2}', 'sm r');
+    label(stg, ax.fx(137), ax.fy(5.3), '\\cQ{\\theta^2 = \\phi^2}', 'sm l');
     label(stg, ax.fx(95), ax.fy(1.38), '\\sin^2\\phi', 'sm muted');
     label(stg, ax.fx(178), ax.fy(1.05), '\\text{false minimum}', 'sm muted r wide');
-    const cur = line(svg, 0, 0, 0, 0, 's-ink', 1), dT = circle(svg, 0, 0, 4.5, 'f-Q'), dS = circle(svg, 0, 0, 4.5, 'f-S'), dN = circle(svg, 0, 0, 4, 'f-mut');
+    const cur = line(svg, 0, 0, 0, 0, 's-ink', 1), dT = circle(svg, 0, 0, 4.5, 'f-S'), dS = circle(svg, 0, 0, 4.5, 'f-Q'), dN = circle(svg, 0, 0, 4, 'f-mut');
     function render() {
       const a = [Bp[0] - A[0], -(Bp[1] - A[1])], b = [C[0] - Bp[0], -(C[1] - Bp[1])];   // y up for the maths
       const la_ = Math.hypot(...a), lb_ = Math.hypot(...b), cr = a[0] * b[1] - a[1] * b[0], dt = a[0] * b[0] + a[1] * b[1];
@@ -1799,15 +1842,15 @@ scene('fig-dcurv', {
       const am = a0 + da / 2; lphi.at(Bp[0] + (R + 18) * Math.cos(am), Bp[1] + (R + 18) * Math.sin(am));
       lA.at(A[0], A[1] + 22); lC.at(C[0] + 4, C[1] + 22); lB.at(Bp[0] + 22, Bp[1] + 26);
       la.at((A[0] + Bp[0]) / 2 - 14 * ua[1] * -1, (A[1] + Bp[1]) / 2 + 16); lb.at((Bp[0] + C[0]) / 2, (Bp[1] + C[1]) / 2 + 18);
-      // binormal: out of the screen (dot) for a left turn, into it (cross) for a right turn
+      // the joint's rotation vector Ψ (the binormal direction): out of the screen (dot) for a left turn, into it (cross) for a right turn
       const bx = Bp[0] - 92 * ua[0] - 6, by = Bp[1] - 92 * ua[1] - 40;
       bin.setAttribute('transform', `translate(${bx} ${by})`);
       const out = kb > 0; binD.style.display = out ? '' : 'none';
       binX.setAttribute('d', out ? '' : 'M-5 -5L5 5M-5 5L5 -5');
-      lkb.at(bx - 14, by - 22);
+      lpsi.at(bx - 14, by - 22);
       const pd = Math.abs(phi) / deg;
-      read.set(`\\phi = ${pd.toFixed(1)}^\\circ, \\quad |\\kappa\\mathbf b| = 2\\tan\\tfrac{\\phi}{2} = ${Math.abs(kb).toFixed(3)}`);
-      readB.set(`\\text{binormal ${out ? 'out of' : 'into'} the screen}`);
+      read.set(`\\phi = ${pd.toFixed(1)}^\\circ, \\quad \\theta = |\\boldsymbol\\Psi_i| = ${Math.abs(phi).toFixed(3)}\\ \\text{rad}`);
+      readB.set(`\\boldsymbol\\Psi_i\\ \\text{${out ? 'out of' : 'into'} the screen;}\\ \\ \\text{earlier rod: } 2\\tan\\tfrac{\\phi}{2} = ${Math.abs(kb).toFixed(3)}`);
       const ap = Math.abs(phi);
       const vT = Math.min((2 * Math.tan(ap / 2)) ** 2, 6), vS = Math.min(ap * ap, 6), vN = Math.sin(ap) ** 2;
       setLine(cur, ax.fx(pd), ax.fy(0), ax.fx(pd), ax.fy(6));
@@ -1823,7 +1866,7 @@ scene('fig-dcurv', {
       const d = { ArrowUp: [0, -6], ArrowDown: [0, 6], ArrowLeft: [-6, 0], ArrowRight: [6, 0] }[e.key];
       if (d) { Bp = [clamp(Bp[0] + d[0], 150, 430), clamp(Bp[1] + d[1], 40, 330)]; render(); e.preventDefault(); }
     });
-    s.render = render; s.set = (p) => { Bp = p; render(); }; s.parts = [eA, eB, ext, arc, cT, cS, cN];
+    s.render = render; s.set = (p) => { Bp = p; render(); }; s.parts = [eA, eB, ext, arc, cTan, cTrue, cN];
     render();
   },
   async intro(s) {
@@ -1963,11 +2006,11 @@ scene('fig-reverse', {
     const pDot = circle(gA, 0, 0, 5, 'f-A'), qDot = circle(gA, 0, 0, 4, 'f-F');
     const rLn = line(gA, 0, 0, 0, 0, 's-Q', 1.6);
     const F = arrow(gA, 'F', 3, 13), f0 = arrow(gA, 'F', 2.6, 11), f1 = arrow(gA, 'F', 2.6, 11);
-    const c0 = arrow(gA, 'Q', 2.2, 9), c1 = arrow(gA, 'Q', 2.2, 9), tw = arcArrow(gA, 'Q', 2.2, 10);
+    const tw = arcArrow(gA, 'Q', 2.2, 10), tb = arcArrow(gA, 'Q', 2.2, 10);       // the frame torque: roll part, part across the lath
     const L = {
       x0: label(stg, 0, 0, '\\mathbf x_i', 'sm'), x1: label(stg, 0, 0, '\\mathbf x_{i+1}', 'sm'), P: label(stg, 0, 0, '\\mathbf P(u)', 'sm cA'),
       F: label(stg, 0, 0, '\\cF{\\mathbf F}', 'sm'), f0: label(stg, 0, 0, '', 'sm'), f1: label(stg, 0, 0, '', 'sm'),
-      r: label(stg, 0, 0, '\\mathbf r', 'sm cQ'), tw: label(stg, 0, 0, '\\cQ{\\tau_\\parallel}', 'sm'), cp: label(stg, 0, 0, '\\pm\\cQ{\\boldsymbol\\tau\\times\\mathbf t_j}/l_j\\ (\\times 20)', 'sm'),
+      r: label(stg, 0, 0, '\\mathbf r', 'sm cQ'), tw: label(stg, 0, 0, '\\cQ{\\tau_Z}', 'sm'), tb: label(stg, 0, 0, '\\cQ{\\boldsymbol\\tau_\\perp}', 'sm'),
       B: label(stg, 0, 0, '\\text{lath B}', 'sm cB'), A: label(stg, 0, 0, '\\text{lath A}', 'sm cA'),
     };
     // free-weight gauge
@@ -2024,7 +2067,7 @@ scene('fig-reverse', {
       const n0 = pr([x0, 0, 0]), n1 = pr([x1, 0, 0]), pp = pr(P);
       nodes[0].setAttribute('cx', n0[0]); nodes[0].setAttribute('cy', n0[1]); nodes[1].setAttribute('cx', n1[0]); nodes[1].setAttribute('cy', n1[1]);
       pDot.setAttribute('cx', pp[0]); pDot.setAttribute('cy', pp[1]);
-      // support point of A towards +n (n = z), the contact force on A, its shares, the lever torque and its split
+      // support point of A towards +n (n = z), the contact force on A, its shares, and the lever torque on the segment's frame
       const nX = Math.sin(phi), nY = Math.cos(phi);
       const r = V.add(V.mul(X, (w / 2) * Math.tanh(nX / eps)), V.mul(Y, (h / 2) * Math.tanh(nY / eps)));
       const Qp = V.add(P, r), qp = pr(Qp);
@@ -2033,12 +2076,9 @@ scene('fig-reverse', {
       const tail = pr(V.sub(Qp, V.mul(FA, k))); F.set(tail[0], tail[1], qp[0], qp[1]);
       const s0 = pr(V.sub([x0, 0, 0], V.mul(FA, k * (1 - t)))), s1 = pr(V.sub([x1, 0, 0], V.mul(FA, k * t)));
       f0.set(s0[0], s0[1], n0[0], n0[1]); f1.set(s1[0], s1[1], n1[0], n1[1]);
+      // the whole torque goes to the frame (Cosserat rod: no split into twist and node couple); drawn by its parts
       const tau = V.cross(r, FA), tpar = tau[0], tperp = [0, tau[1], tau[2]];
-      const cpl = V.mul(V.cross(tperp, Z), 1 / l), ck = k * 20;
-      const c1t = pr(V.add([x1, 0, 0], V.mul(cpl, ck))), c0t = pr(V.add([x0, 0, 0], V.mul(cpl, -ck)));
-      c1.set(n1[0], n1[1], c1t[0], c1t[1]); c0.set(n0[0], n0[1], c0t[0], c0t[1]);
-      const cpOn = V.norm(cpl) * ck > 6; c0.show(cpOn); c1.show(cpOn); L.cp.show(cpOn);
-      // twist arc around the lath axis at the middle of the segment, sweep ∝ |tau_par| (full = Fn w/2)
+      // roll part: an arc around the lath axis at the middle of the segment, sweep ∝ |tau_par| (full = Fn w/2)
       const sweep = clamp(Math.abs(tpar) / (Fn * w / 2), 0, 1) * 1.1 * Math.PI;
       const arcPts = [], R = 52, af = Math.atan2(view[2], view[1]);             // the side of the lath that faces the viewer
       for (let kk = 0; kk <= 28; kk++) { const a = af + Math.sign(tpar) * sweep * (kk / 28 - 0.5); arcPts.push(pr([0, R * Math.cos(a), R * Math.sin(a)])); }
@@ -2047,8 +2087,23 @@ scene('fig-reverse', {
         tw.g.querySelector('path').setAttribute('d', poly(arcPts.slice(0, -2)));
         const e2 = arcPts[arcPts.length - 1], e1 = arcPts[arcPts.length - 3], ux = e2[0] - e1[0], uy = e2[1] - e1[1], nn = Math.hypot(ux, uy) || 1, hx = ux / nn, hy = uy / nn;
         tw.g.querySelectorAll('path')[1].setAttribute('d', `M${e2[0]} ${e2[1]}L${e2[0] - hx * 10 - hy * 4.5} ${e2[1] - hy * 10 + hx * 4.5}L${e2[0] - hx * 10 + hy * 4.5} ${e2[1] - hy * 10 - hx * 4.5}Z`);
-        L.tw.show(true).at(arcPts[14][0] + 44, arcPts[14][1] + 6);
+        L.tw.show(true).at(arcPts[0][0] - 16, arcPts[0][1] + 12);
       } else { tw.g.style.display = 'none'; L.tw.show(false); }
+      // part across the lath (friction along it): an arc about u = tau_perp/|tau_perp|, in the plane of the lath axis
+      // and e2 = u × x, on the side that faces the viewer, drawn further along the segment (a torque on the frame has no
+      // point of application); same scale as the roll arc. It turns the frame against its chord, and the shear spring
+      // and the joints carry it into bending.
+      const tq = V.norm(tperp), sweepB = clamp(tq / (Fn * w / 2), 0, 1) * 1.1 * Math.PI;
+      if (sweepB > 0.08) {
+        const u = V.mul(tperp, 1 / tq), e1 = [1, 0, 0], e2 = V.cross(u, e1), RB = 70, cB = [0.5 * x1, 0, 0];
+        const ac = V.dot(e2, view) >= 0 ? Math.PI / 2 : -Math.PI / 2, bPts = [];
+        for (let kk = 0; kk <= 28; kk++) { const a = ac + sweepB * (kk / 28 - 0.5); bPts.push(pr(V.add(cB, V.add(V.mul(e1, RB * Math.cos(a)), V.mul(e2, RB * Math.sin(a)))))); }
+        tb.g.style.display = '';
+        tb.g.querySelector('path').setAttribute('d', poly(bPts.slice(0, -2)));
+        const e2p = bPts[bPts.length - 1], e1p = bPts[bPts.length - 3], ux = e2p[0] - e1p[0], uy = e2p[1] - e1p[1], nn = Math.hypot(ux, uy) || 1, hx = ux / nn, hy = uy / nn;
+        tb.g.querySelectorAll('path')[1].setAttribute('d', `M${e2p[0]} ${e2p[1]}L${e2p[0] - hx * 10 - hy * 4.5} ${e2p[1] - hy * 10 + hx * 4.5}L${e2p[0] - hx * 10 + hy * 4.5} ${e2p[1] - hy * 10 - hx * 4.5}Z`);
+        L.tb.show(true).at(bPts[14][0] + 4, bPts[14][1] + 18);
+      } else { tb.g.style.display = 'none'; L.tb.show(false); }
       // pins
       [[pin0, n0], [pin1, n1]].forEach(([cb_, n], i) => {
         pins[i].setAttribute('d', cb_.checked ? `M${n[0]} ${n[1] + 6}L${n[0] - 11} ${n[1] + 25}L${n[0] + 11} ${n[1] + 25}ZM${n[0] - 17} ${n[1] + 25}L${n[0] + 17} ${n[1] + 25}` : '');
@@ -2057,7 +2112,6 @@ scene('fig-reverse', {
       L.F.at(tail[0] + 16, tail[1] - 6); L.r.at((pp[0] + qp[0]) / 2 + 14, (pp[1] + qp[1]) / 2);
       L.f0.set(`(1-t)\\,\\cF{\\mathbf F} = ${(1 - t).toFixed(2)}\\,\\cF{\\mathbf F}`).at(s0[0] - 8, s0[1] - 14);
       L.f1.set(`t\\,\\cF{\\mathbf F} = ${t.toFixed(2)}\\,\\cF{\\mathbf F}`).at(s1[0] + 8, s1[1] - 14);
-      L.cp.at((c1t[0] + n1[0]) / 2 + 60, (c1t[1] + n1[1]) / 2 + 36);
       const bEnd = pr([xp + 170 * cb, 170 * sb, D]); L.B.at(bEnd[0] + 30, bEnd[1] - 8);
       const aEnd = pr([x0 - 110, 0, -h]); L.A.at(aEnd[0], aEnd[1] + 24);
       const wf = (pin0.checked ? 0 : (1 - t) ** 2) + (pin1.checked ? 0 : t * t);
