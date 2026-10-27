@@ -35,12 +35,13 @@ h3 { font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: var(--d
 .mono, output, .num, .readout { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 /* one row under the status bar; the flex order docks the sidebars: Setup | (Display | Monitor when docked left) | view |
-   (Monitor | Display when docked right) — the Monitor always next to the view */
+   (Monitor | Display when docked right) | (Setup when docked right) — the Monitor always next to the view */
 #app { display: flex; flex-wrap: wrap; align-content: flex-start; height: 100%; }
 #statusbar { order: 0; flex: 0 0 100%; height: var(--top-h); }
 #panel, #viewport, #monitor, #display { height: calc(100% - var(--top-h)); min-height: 0; }
-#panel { order: 10; flex: 0 0 var(--panel-w); }
-#viewport { order: 40; flex: 1 1 0; }
+#panel { order: 10; flex: 0 0 var(--panel-open-w, var(--panel-w)); }
+#app.setup-right #panel { order: 70; }
+#viewport { order: 40; flex: 1 1 1px; }   /* a 1 px basis (not 0): the view never fits on the status bar's line when it is the first item after it (Setup docked right) */
 #monitor { order: 50; flex: 0 0 var(--monitor-open-w, var(--monitor-w)); }
 #display { order: 60; flex: 0 0 var(--display-w); }
 #app.monitor-left #monitor { order: 30; }
@@ -61,7 +62,8 @@ h3 { font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: var(--d
 
 /* the three sidebars share one anatomy: a head with the fold toggle (and the dock button), a scrolling body */
 #panel, #monitor, #display { display: flex; flex-direction: column; background: var(--panel); min-width: 0; overflow: hidden; }
-#panel { border-right: 1px solid var(--border); }
+#panel { border-right: 1px solid var(--border); position: relative; }
+#app.setup-right #panel { border-right: 0; border-left: 1px solid var(--border); }
 #monitor, #display { border-left: 1px solid var(--border); }
 #app.monitor-left #monitor, #app.display-left #display { border-left: 0; border-right: 1px solid var(--border); }
 .side-head { flex: none; display: flex; align-items: center; }
@@ -73,10 +75,12 @@ h3 { font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: var(--d
 #setup-toggle .chev, #app.monitor-left #monitor-toggle .chev, #app.display-left #display-toggle .chev { transform: rotate(135deg); }
 #app.setup-closed #setup-toggle .chev, #app.monitor-closed.monitor-left #monitor-toggle .chev, #app.display-closed.display-left #display-toggle .chev { transform: rotate(-45deg); }
 #app.monitor-closed #monitor-toggle .chev, #app.display-closed #display-toggle .chev { transform: rotate(135deg); }
+#app.setup-right #setup-toggle .chev { transform: rotate(-45deg); }
+#app.setup-right.setup-closed #setup-toggle .chev { transform: rotate(135deg); }
 .side-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 #sections { padding: 0 14px 28px; }
 #app.setup-closed #panel .side-body, #app.monitor-closed #monitor > :not(.side-head), #app.display-closed #display .side-body,
-#app.monitor-closed #monitor-dock, #app.display-closed #display-dock { display: none; }
+#app.monitor-closed #monitor-dock, #app.display-closed #display-dock, #app.setup-closed #setup-dock, #app.setup-closed #setup-resize { display: none; }
 #app.setup-closed #setup-head, #app.monitor-closed #monitor-head, #app.display-closed #display-head { flex-direction: column; height: 100%; }
 #app.setup-closed #setup-toggle, #app.monitor-closed #monitor-toggle, #app.display-closed #display-toggle { flex: 0 0 auto; flex-direction: column; padding: 10px 0; justify-content: flex-start; }
 #app.setup-closed #setup-toggle .t, #app.monitor-closed #monitor-toggle .t, #app.display-closed #display-toggle .t { writing-mode: vertical-rl; transform: rotate(180deg); }
@@ -116,9 +120,11 @@ h3 { font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: var(--d
 #monitor-body > details.sec > .body { padding-bottom: 14px; }
 .mon-foot { margin: 6px 0 0; }
 .resizer { position: absolute; top: 0; bottom: 0; left: -3px; width: 7px; cursor: col-resize; z-index: 4; touch-action: none; }
-#app.monitor-left .resizer { left: auto; right: -3px; }
+#app.monitor-left #monitor-resize { left: auto; right: -3px; }
+#setup-resize { left: auto; right: -3px; }
+#app.setup-right #setup-resize { right: auto; left: -3px; }
 .resizer:hover, .resizer.drag, .resizer:focus-visible { background: color-mix(in srgb, var(--accent) 35%, transparent); outline: none; }
-#app.monitor-closed .resizer { display: none; }
+#app.monitor-closed #monitor-resize { display: none; }
 
 /* chart cards: title line, legend line, plot — one anatomy everywhere; two columns once the Monitor is wide */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 12px 18px; }
@@ -256,6 +262,11 @@ select { max-width: 230px; font-size: 12.5px; }
 .list .item .x { color: var(--dim); cursor: pointer; border: 0; background: transparent; font: inherit; padding: 0 3px; }
 .list .item .x:hover { color: var(--bad); }
 .list .item .lnk { color: var(--accent); cursor: pointer; border: 0; background: transparent; font: inherit; padding: 0 3px; }
+.list .item.load { flex-wrap: wrap; row-gap: 3px; }
+.list .item.load select { font-size: 11px; padding: 0 3px; max-width: 72px; }
+.list .item .vec { flex: 0 0 100%; display: flex; align-items: center; gap: 4px; padding-left: 6px; color: var(--dim); }
+.list .item .vec .num { width: 54px; padding: 1px 4px; font-size: 11px; }
+.list .item .vec .num.mag { width: 62px; }
 canvas.plot { display: block; width: 100%; height: 190px; margin: 6px 0; }
 
 /* calibration */
@@ -300,6 +311,7 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transpar
 #gl.arm { cursor: crosshair; }
 #drop { position: absolute; inset: 12px; border: 2px dashed var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--accent); background: color-mix(in srgb, var(--canvas) 70%, transparent); font-size: 16px; pointer-events: none; text-align: center; padding: 20px; }
 #mode-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: var(--sel); color: #fff; padding: 4px 12px; border-radius: 12px; font-size: 12.5px; z-index: 4; }
+#marquee { position: absolute; border: 1px solid var(--sel); background: color-mix(in srgb, var(--sel) 12%, transparent); pointer-events: none; z-index: 4; }
 /* hover probe (Joint FEA): the lath and the local values under the cursor */
 #tooltip { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 5; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
   font: 12px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,.14); }
@@ -319,7 +331,7 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transpar
 #nav { position: absolute; top: 10px; right: 10px; display: grid; grid-template-columns: 26px 112px 26px; grid-template-rows: 26px 112px 26px; gap: 2px;
   opacity: 0.78; transition: opacity 0.15s; z-index: 3; }
 #nav:hover, #nav:focus-within { opacity: 1; }
-#navcube { display: block; width: 112px; height: 112px; touch-action: none; cursor: grab; border-radius: 50%; }
+#navcube { display: block; width: 112px; height: 112px; touch-action: none; cursor: grab; }
 #nav .nb { width: 26px; height: 26px; padding: 0; margin: 0; border: 0; border-radius: 6px; background: transparent; color: var(--dim); cursor: pointer; display: grid; place-items: center; }
 #nav .nb svg { width: 18px; height: 18px; display: block; }
 #nav .nb.arrow svg { width: 20px; height: 20px; }
@@ -342,10 +354,10 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transpar
   #viewport { order: 1; flex: none; height: 58vh; }
   #monitor, #app.monitor-left #monitor { order: 2; }
   #display, #app.display-left #display { order: 3; }
-  #panel { order: 4; }
-  #panel, #monitor, #display, #app.setup-closed #panel, #app.monitor-closed #monitor, #app.display-closed #display { flex: none; height: auto; width: 100%; border: 0; border-top: 1px solid var(--border); overflow: visible; }
+  #panel, #app.setup-right #panel { order: 4; }
+  #panel, #monitor, #display, #app.setup-closed #panel, #app.setup-right #panel, #app.monitor-closed #monitor, #app.display-closed #display { flex: none; height: auto; width: 100%; border: 0; border-top: 1px solid var(--border); overflow: visible; }
   .side-body { overflow: visible; }
-  #monitor-dock, #display-dock, .resizer, .mini-run, #app.monitor-closed .mini-run { display: none; }
+  #monitor-dock, #display-dock, #setup-dock, .resizer, .mini-run, #app.monitor-closed .mini-run { display: none; }
   #app.setup-closed #setup-head, #app.monitor-closed #monitor-head, #app.display-closed #display-head { flex-direction: row; height: auto; }
   #app.setup-closed #setup-toggle, #app.monitor-closed #monitor-toggle, #app.display-closed #display-toggle { flex: 1; flex-direction: row; padding: 9px 12px 7px 14px; }
   #app.setup-closed #setup-toggle .t, #app.monitor-closed #monitor-toggle .t, #app.display-closed #display-toggle .t { writing-mode: horizontal-tb; transform: none; }

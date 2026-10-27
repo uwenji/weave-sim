@@ -29,6 +29,7 @@
   <aside id="panel" aria-label="Setup">
     <div class="side-head" id="setup-head">
       <button id="setup-toggle" class="side-toggle" aria-expanded="true" title="show / hide the setup"><span class="chev"></span><span class="t">Setup</span></button>
+      <button id="setup-dock" class="nbtn" title="move the setup to the other side of the view">⇄</button>
     </div>
     <div id="sections" class="side-body">
     <details class="sec" name="setup" id="sec-file" open>
@@ -97,10 +98,12 @@
         <div id="row-assign" hidden>
           <div class="row buttons">
             <button id="btn-lathmode" class="btn toggle" title="click laths in the view to add / remove them (Esc leaves)">Select laths…</button>
-            <button id="btn-selgroup" class="btn sm" title="select the laths of the edited group">laths of group</button>
+            <button id="btn-piecemode" class="btn toggle" title="click pieces between the joints in the view to add / remove them (needs joints: Monitor › Discretisation; Esc leaves)">Select pieces…</button>
+            <button id="btn-selgroup" class="btn sm" title="select the laths (in piece mode: the pieces) of the edited group">laths of group</button>
             <button id="btn-lathclear" class="btn sm">clear</button>
           </div>
-          <div class="row buttons"><button id="btn-assign" class="btn primary">Assign to group</button><span class="readout inline" id="ro-assign"></span></div>
+          <div class="row buttons"><button id="btn-assign" class="btn primary">Assign to group</button><span class="readout inline" id="ro-assign"></span>
+            <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Whole laths, or single pieces between the joints of a discretisation (Monitor › Discretisation › Run, then Select pieces…), go to a group: a piece takes that group's material, section and active-beam settings in the solver, the rest of its lath keeps the lath's group. Pieces are numbered along the lath from its start; Clear joints drops the piece assignments.">i</button></div>
         </div>
         <div class="grid2">
           <label for="nb-E">E <span class="unit u-stress"></span></label><input type="number" id="nb-E" class="num" step="any" data-bind="material.E">
@@ -209,6 +212,12 @@
         <div class="readout sel-readout"></div>
         <div class="row buttons"><span class="hint">select</span>
           <button class="btn sm" id="btn-sel-start">all start frames</button><button class="btn sm" id="btn-sel-end">all end frames</button><button class="btn sm" id="btn-sel-bnd">boundary</button><button class="btn sm" id="btn-sel-clear">clear</button></div>
+        <div class="row" id="row-selz"><span class="hint">Z range</span>
+          <input type="number" id="nb-zlo" class="num sm" step="any" aria-label="lowest Z"><span class="hint">…</span><input type="number" id="nb-zhi" class="num sm" step="any" aria-label="highest Z"><span class="unit u-len"></span>
+          <button class="btn sm" id="btn-sel-z" title="select the crossing frames whose height is within the range (shift adds to the selection)">select</button>
+          <button class="btn sm toggle" id="btn-boxmode" title="drag a rectangle in the view to select the crossing frames inside it (shift adds, alt removes; Esc leaves)">Box select…</button>
+          <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Z range: all crossing frames between the two heights (the model's extent is shown as the placeholder; shift-click adds to the selection).\nBox select…: left-drag a rectangle in the view; every frame inside is selected, through the model (shift adds, alt removes). The selection is then used by Add for selection — and by the point loads in 5 Loads.">i</button></div>
+        <div class="readout" id="ro-zrange"></div>
         <div class="row" id="fix-dofs"><span class="hint">fix</span>
           <label class="check"><input type="checkbox" data-dof="0" checked>X</label><label class="check"><input type="checkbox" data-dof="1" checked>Y</label><label class="check"><input type="checkbox" data-dof="2" checked>Z</label>
           <label class="check"><input type="checkbox" data-dof="3">rX</label><label class="check"><input type="checkbox" data-dof="4">rY</label><label class="check"><input type="checkbox" data-dof="5">rZ</label>
@@ -297,6 +306,7 @@
     </a>
 
     </div>
+    <div id="setup-resize" class="resizer" role="separator" aria-orientation="vertical" aria-label="resize the setup" tabindex="0" title="drag to resize the setup (double-click: default width)"></div>
   </aside>
 
   <main id="viewport">
@@ -315,6 +325,7 @@
     </div>
     <div id="legend" hidden><div id="legend-title" class="mono"></div><div id="legend-bar"></div><div id="legend-ticks" class="mono"><span id="legend-lo"></span><span id="legend-mid"></span><span id="legend-hi"></span></div></div>
     <div id="mode-banner" hidden></div>
+    <div id="marquee" hidden></div>
     <div id="tooltip" hidden></div>
     <div id="drop" hidden>drop scene.json + mesh, a mesh, a UTM csv or calibration files</div>
   </main>
@@ -368,6 +379,7 @@
       </div>
       <div class="row slider"><label for="sl-deform">deformation ×</label><input type="range" id="sl-deform" min="0" max="50" step="0.5" value="1"><output id="out-deform" class="mono">1</output></div>
       <div class="row slider"><label for="sl-arrow">arrow scale</label><input type="range" id="sl-arrow" min="0.2" max="4" step="0.1" value="1"><output id="out-arrow" class="mono">1.0</output></div>
+      <div class="row slider"><label for="sl-jstroke" title="line weight of the joint cuts (discretisation)">joint stroke</label><input type="range" id="sl-jstroke" min="1" max="7" step="0.5" value="3.5"><output id="out-jstroke" class="mono">3.5</output></div>
       <div class="row slider"><label for="sl-turn">turntable °/s</label><input type="range" id="sl-turn" min="1" max="60" step="1" value="12"><output id="out-turn" class="mono">12</output></div>
       <div class="row"><label for="sel-knotpick" class="w">knot dot picks</label><select id="sel-knotpick"><option value="over">over strand</option><option value="under">under strand</option></select></div>
     </div>

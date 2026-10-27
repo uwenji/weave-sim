@@ -6,7 +6,7 @@
 // line up; a hover on any chart against the iteration moves one crosshair through all of them (convergence, energy,
 // the knot charts, the stability checks) with the values in one tooltip. The run bar carries the convergence meter:
 // the residual on a log scale from its first value after the warm-up (empty) to the tolerance (full), one cell per
-// decade still to go. Also here: the Setup sidebar's fold and the memory of its open section.
+// decade still to go. Also here: the Setup sidebar's fold, dock side and width, and the memory of its open section.
 import { drawPlot, fmtNum, watchCanvas } from './plot.js';
 
 /** left inset of every Monitor plot: equal insets align the plots of a column */
@@ -54,34 +54,44 @@ export function initMonitor(ctx) {
   $('monitor-toggle').onclick = () => setOpen(closed());
   $('monitor-dock').onclick = () => setDock(!app.classList.contains('monitor-left'));
   $('monitor-mini').onclick = () => ctx.toggleRun();
-  const maxW = () => Math.max(300, Math.min(880, window.innerWidth - 460));
-  const setWidth = (w, save = true) => {
-    w = Math.round(Math.min(Math.max(w, 260), maxW()));
-    app.style.setProperty('--monitor-open-w', `${w}px`);
-    if (save) store.set('monitorW', w);
-  };
-  { const w = store.get('monitorW', null); if (w) setWidth(w, false); }
-  const rz = $('monitor-resize');
-  let drag = null;
-  rz.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, w: $('monitor').getBoundingClientRect().width }; rz.classList.add('drag'); try { rz.setPointerCapture(e.pointerId); } catch (_) { /* synthetic */ } e.preventDefault(); });
-  rz.addEventListener('pointermove', (e) => { if (!drag) return; const dx = e.clientX - drag.x; setWidth(drag.w + (app.classList.contains('monitor-left') ? dx : -dx)); });
-  const endDrag = () => { if (drag) { drag = null; rz.classList.remove('drag'); } };
-  rz.addEventListener('pointerup', endDrag); rz.addEventListener('pointercancel', endDrag);
-  rz.addEventListener('dblclick', () => { app.style.removeProperty('--monitor-open-w'); store.set('monitorW', null); });
-  rz.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    const grow = (e.key === 'ArrowLeft') !== app.classList.contains('monitor-left');
-    setWidth($('monitor').getBoundingClientRect().width + (grow ? 24 : -24));
-  });
+  /** a sidebar widens by dragging its inner edge (double-click: the default width; arrow keys when focused):
+   *  `rz` the resizer, `el` the sidebar, `cssVar` the width property on #app, `key` its memory, `leftOf()` whether the
+   *  sidebar sits left of the view, `lim` {min, floor, max, reserve}: the width stays within [min, max(floor, min(max,
+   *  window − reserve))] */
+  function makeResizable(rz, el, cssVar, key, leftOf, lim) {
+    const maxW = () => Math.max(lim.floor, Math.min(lim.max, window.innerWidth - lim.reserve));
+    const setWidth = (w, save = true) => {
+      w = Math.round(Math.min(Math.max(w, lim.min), maxW()));
+      app.style.setProperty(cssVar, `${w}px`);
+      if (save) store.set(key, w);
+    };
+    { const w = store.get(key, null); if (w) setWidth(w, false); }
+    let drag = null;
+    rz.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, w: el.getBoundingClientRect().width }; rz.classList.add('drag'); try { rz.setPointerCapture(e.pointerId); } catch (_) { /* synthetic */ } e.preventDefault(); });
+    rz.addEventListener('pointermove', (e) => { if (!drag) return; const dx = e.clientX - drag.x; setWidth(drag.w + (leftOf() ? dx : -dx)); });
+    const endDrag = () => { if (drag) { drag = null; rz.classList.remove('drag'); } };
+    rz.addEventListener('pointerup', endDrag); rz.addEventListener('pointercancel', endDrag);
+    rz.addEventListener('dblclick', () => { app.style.removeProperty(cssVar); store.set(key, null); });
+    rz.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const grow = (e.key === 'ArrowLeft') !== leftOf();
+      setWidth(el.getBoundingClientRect().width + (grow ? 24 : -24));
+    });
+  }
+  makeResizable($('monitor-resize'), $('monitor'), '--monitor-open-w', 'monitorW', () => app.classList.contains('monitor-left'), { min: 260, floor: 300, max: 880, reserve: 460 });
   // charts follow the width of the Monitor (drag, dock, window)
   let roPending = false;
   new ResizeObserver(() => { if (roPending) return; roPending = true; requestAnimationFrame(() => { roPending = false; redraw(); }); }).observe($('monitor-body'));
 
-  // --- the Setup sidebar: fold, and the section left open --------------------------------------------------------
+  // --- the Setup sidebar: fold, dock left / right, width, and the section left open --------------------------------
   const setSetup = (open) => { app.classList.toggle('setup-closed', !open); store.set('setupOpen', open); $('setup-toggle').setAttribute('aria-expanded', String(open)); };
   setSetup(store.get('setupOpen', true) !== false);
   $('setup-toggle').onclick = () => setSetup(app.classList.contains('setup-closed'));
+  const setSetupDock = (right) => { app.classList.toggle('setup-right', right); store.set('setupRight', right); };
+  setSetupDock(!!store.get('setupRight', false));
+  $('setup-dock').onclick = () => setSetupDock(!app.classList.contains('setup-right'));
+  makeResizable($('setup-resize'), $('panel'), '--panel-open-w', 'setupW', () => !app.classList.contains('setup-right'), { min: 300, floor: 340, max: 720, reserve: 520 });
   const secs = qsa('#sections > details.sec');
   { const saved = store.get('setupSection', null); if (typeof saved === 'string') secs.forEach((d) => { d.open = d.id === saved; }); }
   secs.forEach((d) => d.addEventListener('toggle', () => { if (d.open) store.set('setupSection', d.id); else if (!secs.some(x => x.open)) store.set('setupSection', ''); }));

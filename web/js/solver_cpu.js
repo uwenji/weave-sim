@@ -42,17 +42,21 @@ const tanhSafe = Math.tanh;
 
 // ================================================================================================= PolylineContact
 export class PolylineContact {
-  /** secOf(s) → section {width, height}, matOf(s) → material {fc90, E90, H} of the strand's lath group */
+  /** secOf(s, node) → section {width, height}, matOf(s, node) → material {fc90, E90, H} of the lath group at the
+   *  crossing node of strand s (the strand's group, or the piece's) */
   constructor(topo, st, secOf, params, matOf = null) {
     this.p = params;
     const K = st.K; this.K = K;
-    this.strand = new Int32Array(2 * K);
-    st.knotEdges.forEach((e, c) => { const kn = topo.knots.get(e); this.strand[2 * c] = kn.a[0]; this.strand[2 * c + 1] = kn.b[0]; });
+    this.strand = new Int32Array(2 * K); this.knode = new Int32Array(2 * K);
+    st.knotEdges.forEach((e, c) => {
+      const kn = topo.knots.get(e); this.strand[2 * c] = kn.a[0]; this.strand[2 * c + 1] = kn.b[0];
+      this.knode[2 * c] = st.nodeFrameIds.get(fkey(kn.a[0], kn.a[1])) ?? -1; this.knode[2 * c + 1] = st.nodeFrameIds.get(fkey(kn.b[0], kn.b[1])) ?? -1;
+    });
     this.wk = new Float64Array(2 * K); this.hk = new Float64Array(2 * K);
     this.fc90 = new Float64Array(2 * K); this.E90 = new Float64Array(2 * K); this.Hs = new Float64Array(2 * K);
     for (let i = 0; i < 2 * K; i++) {
-      const sec = secOf(this.strand[i]); this.wk[i] = +sec.width; this.hk[i] = +sec.height;
-      const mt = matOf ? matOf(this.strand[i]) : null;
+      const sec = secOf(this.strand[i], this.knode[i]); this.wk[i] = +sec.width; this.hk[i] = +sec.height;
+      const mt = matOf ? matOf(this.strand[i], this.knode[i]) : null;
       this.fc90[i] = mt?.fc90 ?? 8.0; this.E90[i] = mt?.E90 ?? 800.0; this.Hs[i] = mt?.H ?? 30.0;
     }
     this.w = new Float64Array(K); this.h = new Float64Array(K);
@@ -533,7 +537,9 @@ export class CpuSolver {
     this.beam.setClamps(st, this.anchors.rotClamps);
     if (contact) this.contact = contact;
     else {
-      const secOf = (s) => sc.group(sc.strandGroup(s)).section, matOf = (s) => sc.group(sc.strandGroup(s)).material;
+      // the section and material at each crossing node: the strand's lath group, or the group of the piece that holds the node
+      const gNode = sc.nodeGroups(st), grpAt = (s, i) => sc.group(i >= 0 ? gNode[i] : sc.strandGroup(s));
+      const secOf = (s, i) => grpAt(s, i).section, matOf = (s, i) => grpAt(s, i).material;
       this.contact = this.useContacts && st.K ? new PolylineContact(this.topo, st, secOf, sc.contact, matOf) : null;
       if (this.contact) this.contact.dentAfterDefault = (sc.solver.warmup_iter | 0) + (sc.contact.ramp_iter | 0);
     }

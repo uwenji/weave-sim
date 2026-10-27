@@ -172,10 +172,12 @@ const cmapRGB = (v, lo, hi, table) => {
 };
 const rows3 = (A, i0, n) => Array.from({ length: n }, (_, i) => [A[3 * (i0 + i)], A[3 * (i0 + i) + 1], A[3 * (i0 + i) + 2]]);
 /** sections.build for one strand: corner rings (+X+Y, −X+Y, −X−Y, +X−Y) and the faces (sides, end caps if open) */
+/** the swept section along a lath: w, h scalars, or per-node arrays (pieces of a discretisation with their own group) */
 function sectionMesh(P, R, closed, w, h) {
   const n = P.length, V = [], F = [];
   for (let i = 0; i < n; i++) {
-    const ex = [0, 1, 2].map(c => R[i][c] * 0.5 * w), ey = [0, 1, 2].map(c => R[i][3 + c] * 0.5 * h), X = P[i];
+    const wi = w.length !== undefined ? w[i] : w, hi = h.length !== undefined ? h[i] : h;
+    const ex = [0, 1, 2].map(c => R[i][c] * 0.5 * wi), ey = [0, 1, 2].map(c => R[i][3 + c] * 0.5 * hi), X = P[i];
     V.push(X.map((x, c) => x + ex[c] + ey[c]), X.map((x, c) => x - ex[c] + ey[c]), X.map((x, c) => x - ex[c] - ey[c]), X.map((x, c) => x + ex[c] - ey[c]));
   }
   const nseg = closed ? n : n - 1;
@@ -210,13 +212,23 @@ export async function exportRhino({ scene, topo, mesh = null, st = null, results
   if (mesh) for (let i = 0; i < mesh.V.length; i += 3) grow(mesh.V[i], mesh.V[i + 1], mesh.V[i + 2]);
   else for (const P of Xpre) for (const p of P) grow(...p);
   const size = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1.0;
-  const userOf = (s) => { const t = topo.strands[s]; return { strand: s, group: groups[s], family: t.family, closed: !!t.closed, knots: t.edges.length }; };
+  // pieces of a discretisation with their own lath group: the section per node (with a solver state), the groups in the user text
+  const pieceText = (s) => { const e = Object.entries(scene.hybrid.pieces || {}).filter(([k]) => k.startsWith(`${s}:`)).map(([k, v]) => `${k.split(':')[1]}:${v}`); return e.length ? e.join(',') : ''; };
+  const nodeGroups = st && scene.hasPieceGroups ? scene.nodeGroups(st) : null;
+  const sizeOf = (s, sec) => {
+    if (!nodeGroups) return [sec.width, sec.height];
+    const { i0, n } = strandSpan(st, s), ws = [], hs = [];
+    for (let i = i0; i < i0 + n; i++) { const q = scene.group(nodeGroups[i]).section; ws.push(+q.width); hs.push(+q.height); }
+    return [ws, hs];
+  };
+  const userOf = (s) => { const t = topo.strands[s], pt = pieceText(s); return { strand: s, group: groups[s], family: t.family, closed: !!t.closed, knots: t.edges.length, ...(pt ? { piece_groups: pt } : {}) }; };
   const writeModel = (root, X, R, withVectors = false) => {
     for (let s = 0; s < S; s++) {
       const g = groups[s], u = userOf(s), sec = scene.group(g).section;
       w.polyline(X[s], `${root}::polylines${gname(g)}`, `lath ${s}`, u, null, gcol(g));
       if (opt.nurbs) w.nurbs(X[s], `${root}::nurbs${gname(g)}`, `lath ${s}`, u, gcol(g));
-      const sm = sectionMesh(X[s], R[s], !!topo.strands[s].closed, sec.width, sec.height);
+      const [sw, sh] = X === Xdef ? sizeOf(s, sec) : [sec.width, sec.height];
+      const sm = sectionMesh(X[s], R[s], !!topo.strands[s].closed, sw, sh);
       w.mesh(sm.V, sm.F, `${root}::laths${gname(g)}`, `lath ${s}`, { ...u, width: +sec.width, height: +sec.height }, null, null, gcol(g));
     }
     if (withVectors) for (const [fk, e] of topo.frameToKnot) {             // one vector per crossing frame (not per node)
@@ -253,8 +265,8 @@ export async function exportRhino({ scene, topo, mesh = null, st = null, results
         const table = SIGNED.has(lay) ? COOLWARM : VIRIDIS, root = `WeaveSim::2 result::laths by layer::${lay}`;
         const nv = nodeValues(st, results, lay, { knotPairs: pairs });
         for (let s = 0; s < S; s++) {
-          const { i0, n } = strandSpan(st, s), sec = scene.group(groups[s]).section;
-          const sm = sectionMesh(Xdef[s], Rdef[s], !!topo.strands[s].closed, sec.width, sec.height);
+          const { i0, n } = strandSpan(st, s), sec = scene.group(groups[s]).section, [sw, sh] = sizeOf(s, sec);
+          const sm = sectionMesh(Xdef[s], Rdef[s], !!topo.strands[s].closed, sw, sh);
           const vals = nv.subarray(i0, i0 + n), vc = []; for (const v of vals) { const c = cmapRGB(v, vmin, vmax, table); vc.push(c, c, c, c); }
           let mn = Infinity, mx = -Infinity; for (const v of vals) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
           w.mesh(sm.V, sm.F, root, `lath ${s}`, { ...userOf(s), layer: lay, min: mn, max: mx }, vc);
@@ -347,6 +359,6 @@ export async function exportRhino({ scene, topo, mesh = null, st = null, results
   }
   const bytes = w.bytes();
   const groupsDict = {}; for (let g = 1; g <= scene.nGroups; g++) groupsDict[g] = { name: scene.group(g).name, section: scene.group(g).section, material: scene.group(g).material };
-  const index = { file: `${name}.3dm`, units: scene.units.toJSON(), scene: sceneName || '', hybrid, groups: groupsDict, strand_groups: groups, objects: w.index };
+  const index = { file: `${name}.3dm`, units: scene.units.toJSON(), scene: sceneName || '', hybrid, groups: groupsDict, strand_groups: groups, ...(scene.hasPieceGroups ? { piece_groups: { ...scene.hybrid.pieces } } : {}), objects: w.index };
   return { bytes, index, objects: Object.keys(w.index).length };
 }

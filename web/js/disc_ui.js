@@ -58,6 +58,7 @@ export function initDiscretize(ctx) {
     const d = A.disc; if (!d) return;
     A.discResult = d.result();
     A.scene.joints = Object.fromEntries(Object.entries(A.discResult.joints).map(([s, v]) => [String(s), v]));
+    A.scene.prunePieces();                                         // piece → group assignments past the new piece count go
     lastPublish = performance.now();
     ctx.onJoints(); readouts(); drawChart(); drawPlots();
   }
@@ -68,7 +69,10 @@ export function initDiscretize(ctx) {
   }
   function reset() {
     A.disc = null; A.discResult = null; A.discRunning = false; runButton();
-    A.scene.joints = {}; ctx.onJoints(); readouts(); drawChart(); drawPlots();
+    const np = Object.keys(A.scene.hybrid.pieces || {}).length;
+    A.scene.joints = {}; A.scene.hybrid.pieces = {};             // no pieces, no piece → group assignments
+    ctx.onJoints(); readouts(); drawChart(); drawPlots();
+    if (np) status(`joints cleared — ${np} piece → group assignment${np === 1 ? '' : 's'} dropped with them`);
   }
   /** one animation frame of a running annealing (~12 ms of temperature steps) */
   function tick() {

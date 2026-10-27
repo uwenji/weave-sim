@@ -11,11 +11,11 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 
 | file | what it does |
 |---|---|
-| `index.html`, `style.css` | the app: status bar; the Setup sidebar (sections 1 File … 10 Calibration, an accordion); the 3-D view with the navigation cube, the colour legend and the value labels; the Monitor sidebar (run bar, convergence meter, the charts in folding groups) and the Display sidebar (colour, diagram, view) — each folds to a tab, Monitor and Display dock left or right, the Monitor widens by its inner edge — the idiom of the WeaveSim viewer, LocalSH and the Joint FEA apps; info icons carry the operation hints |
+| `index.html`, `style.css` | the app: status bar; the Setup sidebar (sections 1 File … 10 Calibration, an accordion); the 3-D view with the navigation cube, the colour legend and the value labels; the Monitor sidebar (run bar, convergence meter, the charts in folding groups) and the Display sidebar (colour, diagram, view) — each folds to a tab and docks left or right, Setup and Monitor widen by their inner edge — the idiom of the WeaveSim viewer, LocalSH and the Joint FEA apps; info icons carry the operation hints |
 | `theory.html` | how the solver works, for reviewers and for readers without the maths (opened from *11 Theory* at the end of the menu): the Cosserat rod, second-order theory, the sliding contact point and reverse kinematics, the section-aware gap, friction, embedment, dynamic relaxation and its safeguards (the 17 Oct 2026 multiplier fix, pass-through) — every equation with its code location, interactive figures, light and dark, a plain-words reading mode; one self-contained page, KaTeX from `vendor/katex` |
-| `js/app.js` | scene / model management, panels, solve loop, picking (frames; whole laths for the lath groups), UTM replay, Rhino export |
+| `js/app.js` | scene / model management, panels (editable point loads, Z-range and box selection of frames), solve loop, picking (frames; whole laths and pieces for the lath groups), UTM replay, Rhino export |
 | `js/display_ui.js` | the Display sidebar: lath colouring and legend, member diagrams, joints overlay |
-| `js/monitor_ui.js` | the Monitor: fold / dock / width, the run bar and its convergence meter, the solver, stability and probe charts, the shared crosshair and tooltip; the Setup fold and its open section |
+| `js/monitor_ui.js` | the Monitor: fold / dock / width, the run bar and its convergence meter, the solver, stability and probe charts, the shared crosshair and tooltip; the Setup fold / dock / width and its open section |
 | `js/knot_ui.js`, `js/knot_history.js` | Monitor › Knots: the followed crossings (picking, chips), small multiples of crossing quantities against a shared x, the table view; the lean per-crossing history they plot |
 | `js/stability.js` | Monitor › Stability: the eigenvalue nearest zero of the tangent stiffness and the number of unstable modes |
 | `js/info.js` | the info icons: hints on hover, focus or tap |
@@ -29,7 +29,7 @@ Start: see [HOW_TO_START.md](HOW_TO_START.md) — `python web/serve.py`, then <h
 | `js/export3dm.js` | Rhino .3dm export (export3dm.py) with rhino3dm.js (`vendor/rhino3dm`, loaded on the first export) |
 | `js/scene.js`, `params.js`, `units.js` | `scene.json` (version 1) read and written exactly as the Python program; unit conversion |
 | `js/mesh.js`, `topology.js`, `pyset.js` | STL / OBJ, the kagome tracer — knot, strand and frame ids identical to the Python program (CPython set-iteration order emulated for the family colouring) |
-| `js/model.js`, `quat.js` | solver state, selectors, anchors, loads, section stiffness of the lath groups |
+| `js/model.js`, `quat.js` | solver state, selectors, anchors, loads, section stiffness of the lath groups per segment (a piece of a discretisation may have its own group) |
 | `js/rod_cosserat.js` | the rod: discrete Cosserat rod (stretch, two shears, anisotropic bending, twist from the relative rotation of neighbouring segment frames, exact torques incl. the roll moment, clamp joints, activation) |
 | `js/solver_cpu.js` | the solver in f64: CpuSolver (dynamic relaxation of node positions and segment frames, kinetic damping), PolylineContact (global parameter u, Hermite centreline, section-aware gap, lever-arm torque, Coulomb stick / slip, lock, W1 contact type, W2 rotational friction, W3 seat law, augmented Lagrangian) |
 | `js/wgsl.js`, `js/solver_gpu.js` | the same solver as WGSL kernels, B instances per dispatch (see *Precision* and *Batching*) |
@@ -145,6 +145,16 @@ interactive run and a calibration share it and the driver interleaves them.
   colour with a dark line along them, the others faded; a click on anything else clears, leaving the mode clears);
   `Assign … to group n` rebuilds the model with the group's section, as the Python program, and shows the new group
   colours at once.
+* **Piece groups** (27 Oct 2026): with a discretisation in place, `Select pieces…` picks single pieces between the
+  joints (key `strand:piece`, pieces numbered from the strand start) and `Assign` gives them a group of their own:
+  `scene.hybrid.pieces` (saved with the scene; the Python program ignores the key). `Scene.segmentGroups(st)` /
+  `nodeGroups(st)` resolve the group per segment / node from the piece index of the segment midpoint / node
+  (`discretize.segmentPieceIndex`, `pieceIndex`); `strandStiffness`, the self-weight, the contact's section and
+  embedment material at each crossing node, the knot stress sections, the view's swept sections and the Rhino export
+  read them, so a lath can change section and material along its length. The knot pre-offset of the topology keeps
+  the strand's group height (the contact enforces the actual gap). With piece groups the joints are part of the goal
+  signature: moving joints re-derive the segment groups live; assigning pieces resets the model. `Clear joints`
+  drops the assignments; `prunePieces` removes assignments past the piece count after a re-run.
 
 ## Calibration sandbox (section 10)
 

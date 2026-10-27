@@ -23,9 +23,9 @@ certificate warning once (the certificate is made with openssl on the first star
 ## 2 · First five minutes
 
 The window has three sidebars around the 3-D view: **Setup** on the left (the numbered sections, one open at a time),
-**Monitor** and **Display** on the right. Each folds to a narrow tab with its header; `⇄` moves Monitor or Display to
-the other side of the view; drag the inner edge of the Monitor to widen it (two columns of charts from ~580 px).
-The **i** icons explain a control on hover (or tap).
+**Monitor** and **Display** on the right. Each folds to a narrow tab with its header; `⇄` moves any of the three to
+the other side of the view; drag the inner edge of the Setup or the Monitor to widen it (double-click the edge: the
+default width; two chart columns in the Monitor from ~580 px). The **i** icons explain a control on hover (or tap).
 
 1. **File** — the example list loads `v5 dome (cm)` at the start; any WeaveSim `scene.json` opens with its mesh (select
    both files, or drop them on the view). A mesh alone starts a new scene with the current settings and anchors at the
@@ -64,14 +64,30 @@ The **i** icons explain a control on hover (or tap).
 7. **Joints** (8 Discretisation for the parameters, Monitor › Discretisation to run) — stock length, joint length,
    extra joints, the objective weights (curvature at the joints, spacing, uniform pieces, keep clear of crossings,
    *structural*: away from high values of a result layer — solve first). `Run` anneals the joint positions on the
-   current geometry; the cuts appear on the laths, *pieces* colours them, the Display › Diagram option *around joints
-   only* shows the diagram within ±n crossings of the joints. `export joints (csv)`; the joints are saved with the scene.
+   current geometry; the cuts appear on the laths (their line weight: Display › View › *joint stroke*), *pieces*
+   colours them, the Display › Diagram option *around joints only* shows the diagram within ±n crossings of the
+   joints. `export joints (csv)`; the joints and the parameters are saved with the scene (`Save scene`), written into
+   `Export results` (`joints`: positions, the piece groups) and exported to Rhino.
 8. **Loads and anchors** (5, 6) — click a lath next to a crossing to select that frame (shift adds / removes), then
-   `Add to selection`. Anchors: quick-select all start / end / boundary frames, tick the fixed DOFs. Loads, anchors,
-   material, beam and contact apply live to the running model; section, weave and units rebuild it.
+   `Add to selection`. Two more ways to select (6 Anchors; the selection also serves the point loads): **Z range** —
+   type the lower and / or upper height and `select` (an empty box means that end of the model; shift-click adds), and
+   **Box select…** (key B) — drag a rectangle in the view, every crossing frame inside is selected through the model
+   (shift adds, alt removes, a plain click still picks one frame; Esc leaves). Anchors: quick-select all start / end /
+   boundary frames, tick the fixed DOFs. Every point load is editable in its row: the three components (in world
+   axes, or in the frame axes X width / Y normal / Z tangent — the little selector), and `|F|`, which rescales the
+   vector. Loads, anchors, material, beam and contact apply live to the running model; section, weave and units
+   rebuild it.
 9. **Lath groups** (3) — tick *lath groups*, choose the group to edit, `Select laths…` and click laths in the view: the
    selected laths turn orange with a dark line along them, the others fade (click a lath again to remove it, click
    anywhere else to clear, `laths of group` takes the group's current laths, Esc leaves). `Assign … to group n`.
+   **Pieces**: after a discretisation (7), `Select pieces…` picks single pieces between the joints instead of whole
+   laths; `Assign` gives those pieces the group's material, section and active-beam settings in the solver (per
+   segment: stiffness, self-weight, the section at the crossings) while the rest of the lath keeps its group — e.g.
+   compressed timber only where the curvature is high. Colour by *lath group* shows the pieces; the hover window
+   names the piece and its group; `pieces of group` selects the pieces assigned to the edited group. The
+   assignments are saved with the scene (`hybrid.pieces`, keyed lath:piece, pieces numbered from the lath start);
+   `Clear joints` drops them, a re-run with the same joint count keeps them. Assigning pieces resets the solve
+   (Reset) — discretise, assign, then Run.
 10. **Rhino** (1 File) — `Export Rhino .3dm`: the model, and after a solve the deformed laths, the laths by result
    layer, the diagrams, contact forces, reactions, joints, supports and loads in a layer tree with user text on every
    object (Rhino 7 format) + a `.3dm.json` index. Chrome may ask once to allow two downloads.
@@ -80,7 +96,8 @@ The **i** icons explain a control on hover (or tap).
    with 64-bit fixed-point positions, frames and force sums (bit-reproducible). Very stiff contacts leave a small
    residual floor on the GPU: `f64 polish` (7 Solve) finishes on the CPU from the GPU state.
 12. **View cube** — click a face / edge / corner, drag to orbit; ⌂ home, ⤢ fit, ⟳ turntable, perspective /
-   orthographic. Keys H F T P. Wheel: zoom, right-drag: pan.
+   orthographic; the xyz triad at its bottom-left corner follows the model. Keys H F T P (B: box select). Wheel:
+   zoom, right-drag: pan.
 
 ## 3 · A UTM test on the model (section 9)
 

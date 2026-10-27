@@ -200,8 +200,15 @@ export class Loads {
     if (L.gravity.enabled) {
       const g = L.gravity.direction.map(Number), gl = Math.max(Math.sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]), 1e-12);
       for (let c = 0; c < 3; c++) g[c] /= gl;
-      const qS = Array.from({ length: st.S }, (_, s) => { const grp = scene.group(scene.strandGroup(s)); return u.selfWeightLineLoad(grp.material.density, sectionArea(grp.section)); });
-      for (let i = 0; i < n; i++) { const q = qS[st.nodeStrand[i]] * trib[i]; for (let c = 0; c < 3; c++) this.const[3 * i + c] += q * g[c]; }
+      // self-weight per segment (its lath group's density × area — a piece of a discretisation may have its own group),
+      // half to each end node
+      const gSeg = scene.segmentGroups(st), qOf = new Map();
+      for (let j = 0; j < st.m; j++) {
+        const gr = gSeg[j];
+        if (!qOf.has(gr)) { const grp = scene.group(gr); qOf.set(gr, u.selfWeightLineLoad(grp.material.density, sectionArea(grp.section))); }
+        const q = 0.5 * st.l0[j] * qOf.get(gr);
+        for (const i of [st.segI0[j], st.segI1[j]]) for (let c = 0; c < 3; c++) this.const[3 * i + c] += q * g[c];
+      }
     }
     if (L.udl.enabled) {
       const qv = L.udl.q.map(Number);
@@ -224,19 +231,22 @@ export class Loads {
 }
 
 // ------------------------------------------------------------------------------------------------ stiffness
-/** per-segment EA / EIx / EIy / GJ (section stiffness × beam factors of the strand's lath group) and per-joint
- *  activation (flat, edge, twist) */
+/** per-segment EA / EIx / EIy / GJ (section stiffness × beam factors of the segment's lath group: the strand's, or the
+ *  piece's where a piece of a discretisation is assigned to a group) and per-joint activation (flat, edge, twist) */
 export function strandStiffness(scene, st) {
-  const per = [], acts = [];
-  for (let s = 0; s < st.S; s++) {
-    const g = scene.strandGroup(s), grp = scene.group(g);
-    const k = sectionStiffness(grp.section, grp.material), f = beamFactors(grp.beam);
-    per.push({ EA: k.EA * f.EA, EIx: k.EIx * f.EIx, EIy: k.EIy * f.EIy, GJ: k.GJ * f.GJ, GA: k.GA * (f.GA ?? 1.0) });
-    acts.push(g === 1 ? beamActivations(scene.beam) : beamActivations(grp.beam));
-  }
+  const gSeg = scene.segmentGroups(st), byGroup = new Map();
+  const of = (g) => {
+    let v = byGroup.get(g);
+    if (!v) {
+      const grp = scene.group(g), k = sectionStiffness(grp.section, grp.material), f = beamFactors(grp.beam);
+      v = { EA: k.EA * f.EA, EIx: k.EIx * f.EIx, EIy: k.EIy * f.EIy, GJ: k.GJ * f.GJ, GA: k.GA * (f.GA ?? 1.0), act: g === 1 ? beamActivations(scene.beam) : beamActivations(grp.beam) };
+      byGroup.set(g, v);
+    }
+    return v;
+  };
   const EA = new Float64Array(st.m), EIx = new Float64Array(st.m), EIy = new Float64Array(st.m), GJ = new Float64Array(st.m), GA = new Float64Array(st.m);
-  for (let j = 0; j < st.m; j++) { const q = per[st.segStrand[j]]; EA[j] = q.EA; EIx[j] = q.EIx; EIy[j] = q.EIy; GJ[j] = q.GJ; GA[j] = q.GA; }
+  for (let j = 0; j < st.m; j++) { const q = of(gSeg[j]); EA[j] = q.EA; EIx[j] = q.EIx; EIy[j] = q.EIy; GJ[j] = q.GJ; GA[j] = q.GA; }
   const act = new Float64Array(3 * st.p);
-  for (let j = 0; j < st.p; j++) act.set(acts[st.segStrand[st.jSeg0[j]]], 3 * j);
+  for (let j = 0; j < st.p; j++) act.set(of(gSeg[st.jSeg0[j]]).act, 3 * j);
   return { stiff: { EA, EIx, EIy, GJ, GA }, act };
 }

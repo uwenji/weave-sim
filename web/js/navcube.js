@@ -11,6 +11,7 @@ const FACES = [
   { id: 'top', n: [0, 0, 1], up: [0, 1, 0], label: 'TOP' }, { id: 'bottom', n: [0, 0, -1], up: [0, 1, 0], label: 'BOTTOM' },
 ];
 const AXIS_COLORS = [0xd0392b, 0x3a9b45, 0x2d6fd1];
+const TRIAD_LEN = 0.52, TRIAD_IN = 0.60;                  // axis length and corner inset of the xyz triad (camera units; the view spans ±L)
 const cssVar = (name, fallback) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 
 export class NavCube {
@@ -84,12 +85,14 @@ export class NavCube {
     const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(outline), 3));
     this.outline = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.9 }));
     group.add(this.outline);
-    // xyz triad: world-aligned lines at a fixed spot of the little viewport (positioned each frame in camera space)
-    this.triad = new THREE.Group();
+    // xyz triad: world-aligned lines at a fixed spot of the little viewport (positioned each frame in camera space);
+    // its origin sits TRIAD_IN from the bottom-left corner so that an axis of length TRIAD_LEN never leaves the canvas,
+    // whichever way the model is turned, and it is drawn over the cube (no depth test) so a corner facet never hides it
+    this.triad = new THREE.Group(); this.triad.renderOrder = 2;
     AXIS_COLORS.forEach((col, k) => {
-      const a = [0, 0, 0], b = [0, 0, 0]; b[k] = 0.5;
+      const a = [0, 0, 0], b = [0, 0, 0]; b[k] = TRIAD_LEN;
       const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from([...a, ...b]), 3));
-      this.triad.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: col })));
+      this.triad.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: col, depthTest: false, depthWrite: false })));
     });
     this.scene.add(this.triad);
   }
@@ -167,7 +170,7 @@ export class NavCube {
     this.camera.quaternion.copy(mainCamera.quaternion);
     this.camera.updateMatrixWorld();
     // triad pinned to the bottom-left of the little viewport, in front of the cube
-    this.triad.position.copy(this.camera.localToWorld(new THREE.Vector3(-this.L + 0.42, -this.L + 0.42, -4.5)));
+    this.triad.position.copy(this.camera.localToWorld(new THREE.Vector3(-this.L + TRIAD_IN, -this.L + TRIAD_IN, -4.5)));
     this.renderer.render(this.scene, this.camera);
   }
 

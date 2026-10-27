@@ -19,6 +19,7 @@ import {
 } from './colormap.js';
 import { fkey } from './topology.js';
 import { interp } from './fields.js';
+import { pieceIndex, segmentPieceIndex } from './discretize.js';
 
 const cssVar = (name, fallback) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 const cssColor = (name, fallback) => new THREE.Color(cssVar(name, fallback));
@@ -86,7 +87,8 @@ export class View {
     this.bboxSize = 1; this.center = new THREE.Vector3(); this.size = 1;
     this.labelCache = new Map();
     this.labelItems = [];
-    this.strandSel = new Set();
+    this.strandSel = new Set(); this.pieceSel = new Set();          // highlighted laths, and pieces "strand:piece" of a discretisation
+    this.jointStroke = 3.5;                                           // line weight of the joint cuts (px)
     this.lutTex = new THREE.DataTexture(lutBytes('viridis'), 256, 1, THREE.RGBAFormat);
     this.lutTex.colorSpace = THREE.SRGBColorSpace; this.lutTex.magFilter = THREE.LinearFilter; this.lutTex.minFilter = THREE.LinearFilter; this.lutTex.needsUpdate = true;
     this.lutName = 'viridis';
@@ -175,6 +177,9 @@ export class View {
   }
   home(ms = 500) { this.lookFrom(HOME_DIR, { dist: this.fitDistance(), target: this.center, zoom: this.fitZoom(), ms }); }
   fit(ms = 400) { this.lookFrom(this.viewDir(), { dist: this.fitDistance(), target: this.center, zoom: this.fitZoom(), ms, tiltFrom: this.viewDir() }); }
+  /** left-drag orbits (default); off while the app uses the left button for a box selection — right-drag pan and the
+   *  wheel zoom stay */
+  setLeftDrag(on) { this.controls.mouseButtons.LEFT = on ? THREE.MOUSE.ROTATE : -1; }
   setTurntable(on, degPerSec = this.turnSpeed) { if (on) this.autoFit = false; this.turntable = !!on; this.turnSpeed = degPerSec; this.controls.autoRotate = this.turntable; this.controls.autoRotateSpeed = degPerSec / 6; }
   setProjection(kind) {
     if (kind === this.projection) return;
@@ -205,12 +210,10 @@ export class View {
   setModel({ topo, st, scene }, { keepCamera = false } = {}) {
     this.topo = topo; this.st = st; this.sceneModel = scene;
     const S = st.S, m = st.m;
-    this.secW = new Float32Array(S); this.secH = new Float32Array(S);
-    for (let s = 0; s < S; s++) { const sec = scene.group(scene.strandGroup(s)).section; this.secW[s] = sec.width; this.secH[s] = sec.height; }
-    this.strandGroup = Int32Array.from({ length: S }, (_, s) => scene.strandGroup(s));
+    this._sections(scene);
     this.family = Int32Array.from(topo.strands.map(s => s.family ?? 0));
     this.closed = topo.strands.map(s => !!s.closed);
-    this.strandSel = new Set([...this.strandSel].filter(s => s < S));
+    this.strandSel = new Set([...this.strandSel].filter(s => s < S)); this.pieceSel = new Set();
     // crossings: node pair per knot (sorted edge order = st.knotEdges), and the knot state colours (Python theme)
     const K = st.K; this.knotNodes = new Int32Array(2 * K); this.knotState = new Uint8Array(K);
     for (let c = 0; c < K; c++) {
@@ -293,6 +296,30 @@ export class View {
     if (!keepCamera) { this.home(0); this.autoFit = true; }
   }
 
+  /** sections and lath groups: per strand (the strand's group) and per segment (a piece of a discretisation may have its
+   *  own group), and the piece index of every segment and node */
+  _sections(scene) {
+    const st = this.st, S = st.S, m = st.m;
+    this.secW = new Float32Array(S); this.secH = new Float32Array(S);
+    for (let s = 0; s < S; s++) { const sec = scene.group(scene.strandGroup(s)).section; this.secW[s] = sec.width; this.secH[s] = sec.height; }
+    this.strandGroup = Int32Array.from({ length: S }, (_, s) => scene.strandGroup(s));
+    this.segGroup = scene.segmentGroups(st);
+    this.segW = new Float32Array(m); this.segH = new Float32Array(m);
+    for (let j = 0; j < m; j++) { const sec = scene.group(this.segGroup[j]).section; this.segW[j] = sec.width; this.segH[j] = sec.height; }
+    const hasJoints = Object.values(scene.joints || {}).some(v => v && v.length);
+    this.segPiece = hasJoints ? segmentPieceIndex(scene, st) : new Int32Array(m);
+    this.nodePiece = hasJoints ? pieceIndex(scene, st) : new Int32Array(st.n);
+  }
+  /** the joints or the group assignments changed: sections, piece indices, geometry and colours follow */
+  refreshSections(scene = this.sceneModel) {
+    if (!this.st || !scene || !this.lathPos) return;
+    this._sections(scene); this.updateGeometry();
+    if (this.pieceSel.size || this.strandSel.size) this._buildPath();
+    this.recolour();
+  }
+  pieceOfSegment(j) { return this.segPiece ? this.segPiece[j] : 0; }
+  pieceOfNode(i) { return this.nodePiece ? this.nodePiece[i] : 0; }
+
   /** positions on the current state (st.X, st.Q); displayed geometry = X0 + deform · (X − X0) */
   updateGeometry(st = this.st) {
     if (!st || !this.lathPos) return;
@@ -306,7 +333,7 @@ export class View {
     const pos = this.lathPos, nrm = this.lathNrm, lp = this.linePos;
     const corner = (o, i, sx, sy, w, h) => { for (let c = 0; c < 3; c++) pos[o + c] = P[3 * i + c] + sx * 0.5 * w * R[9 * i + c] + sy * 0.5 * h * R[9 * i + 3 + c]; };
     for (let j = 0; j < m; j++) {
-      const a = st.segI0[j], b = st.segI1[j], str = st.segStrand[j], w = this.secW[str], h = this.secH[str];
+      const a = st.segI0[j], b = st.segI1[j], w = this.segW[j], h = this.segH[j];
       const base = 48 * j;
       // faces: +Y (top), −Y, +X, −X; vertices a−, a+, b+, b− around each face
       corner(base + 0, a, -1, 1, w, h); corner(base + 3, a, 1, 1, w, h); corner(base + 6, b, 1, 1, w, h); corner(base + 9, b, -1, 1, w, h);
@@ -346,11 +373,14 @@ export class View {
    *  [hex…]} — colours sRGB */
   setColouring(c) { this.colouring = c; this.recolour(); }
   setStrandSelection(strands) { this.strandSel = new Set(strands); this._buildPath(); this.recolour(); }
+  /** pieces of a discretisation highlighted like a lath selection: keys "strand:piece" */
+  setPieceSelection(keys) { this.pieceSel = new Set(keys); this._buildPath(); this.recolour(); }
 
   recolour() {
     const st = this.st; if (!st || !this.lathCol) return;
     const c = this.colouring || { mode: 'family' }, m = st.m, col = this.lathCol, sc = this.lathScal, lc = this.lineCol;
-    const dimOthers = this.strandSel.size > 0, canvas = toSRGB(this.colCanvas);
+    const dimOthers = this.strandSel.size > 0 || this.pieceSel.size > 0, canvas = toSRGB(this.colCanvas);
+    const selected = (s, j) => this.strandSel.has(s) || (this.pieceSel.size > 0 && this.pieceSel.has(`${s}:${this.segPiece[j]}`));
     const layer = c.mode === 'layer', lutPath = layer && c.where !== 'knot' && !c.categorical && !dimOthers;
     const span = Math.max(c.hi - c.lo, 1e-300);
     const t01 = (v) => (Number.isFinite(v) ? (v - c.lo) / span : 0);
@@ -389,9 +419,10 @@ export class View {
       let ra, rb, ta = 0, tb = 0;
       if (layer && c.where === 'segment') { ra = rb = vcol(c.values[j]); ta = tb = t01(c.values[j]); }
       else if (layer && c.where === 'node') { ra = nodeRGB(a, s); rb = nodeRGB(b, s); ta = t01(c.values[a]); tb = t01(c.values[b]); }
+      else if (c.mode === 'group') ra = rb = lift(GROUP_COLORS[(this.segGroup[j] - 1) % GROUP_COLORS.length]);   // per segment: a piece may have its own group
       else { ra = nodeRGB(a, s); rb = nodeRGB(b, s); }
-      if (dimOthers) {                                // a lath selection: the selected laths in the selection colour, the others faded
-        if (this.strandSel.has(s)) ra = rb = SEL_RGB;
+      if (dimOthers) {                                // a lath / piece selection: the selected ones in the selection colour, the others faded
+        if (selected(s, j)) ra = rb = SEL_RGB;
         else { ra = ra.map((v, k) => 0.42 * v + 0.58 * canvas[k]); rb = rb.map((v, k) => 0.42 * v + 0.58 * canvas[k]); }
       }
       const la = lin(ra), lb = lin(rb);
@@ -577,26 +608,38 @@ export class View {
     this.jointSpec = spec;
     if (!spec || !spec.points.length) { this._setLayer('joints', null); return; }
     const g = new THREE.Group();
-    g.add(this._fatLines(spec.cuts, { rgb: this.dark ? [0.85, 0.85, 0.88] : CUT_COLOR, width: 2.2 }));
-    const kmax = Math.max(...spec.kappa, 0), r = 0.35 * Math.max(...this.secH);
+    g.add(this._fatLines(spec.cuts, { rgb: this.dark ? [0.85, 0.85, 0.88] : CUT_COLOR, width: this.jointStroke }));
+    const kmax = Math.max(...spec.kappa, 0), r = (0.3 + 0.03 * this.jointStroke) * Math.max(...this.secH);
     const im = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshStandardMaterial({ roughness: 0.6 }), spec.points.length), M4 = new THREE.Matrix4();
     spec.points.forEach((p, k) => { M4.makeScale(r, r, r).setPosition(p[0], p[1], p[2]); im.setMatrixAt(k, M4); im.setColorAt(k, srgbColor(kmax > 0 ? lutColor('reds', spec.kappa[k] / kmax) : CUT_COLOR)); });
     im.renderOrder = 3; g.add(im);
     this._setLayer('joints', g);
   }
 
-  // --- a lath selection (LocalSH): the other laths dimmed, a tube along each selected lath ---------------------------
+  /** the stroke weight of the joint cuts (px) */
+  setJointStroke(w) { this.jointStroke = Math.max(0.5, +w || 3.5); if (this.jointSpec) this.setJoints(this.jointSpec); }
+
+  // --- a lath / piece selection (LocalSH): the other laths dimmed, a tube along each selected lath or piece ------------
   _buildPath() {
     const st = this.st, P = this.dispX, R = this.nodeR;
-    if (!st || !P || !this.strandSel.size) { this._setLayer('path', null); return; }
+    if (!st || !P || (!this.strandSel.size && !this.pieceSel.size)) { this._setLayer('path', null); return; }
     const g = new THREE.Group(), mat = new THREE.MeshBasicMaterial({ color: this.colFg });
-    for (const s of this.strandSel) {
-      const i0 = st.nodeOffset[s], n = st.nodeOffset[s + 1] - i0; if (n < 2) continue;
+    const tube = (s, i0, n, closed) => {
+      if (n < 2) return;
       const h = this.secH[s], r = 0.16 * Math.max(this.secW[s], h), off = 0.5 * h + 0.5 * r;
       const pts = []; for (let i = i0; i < i0 + n; i++) pts.push(new THREE.Vector3(P[3 * i] + off * R[9 * i + 3], P[3 * i + 1] + off * R[9 * i + 4], P[3 * i + 2] + off * R[9 * i + 5]));
-      const curve = new THREE.CatmullRomCurve3(pts, this.closed[s], 'centripetal', 0.5);
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(16, 3 * n), r, 6, this.closed[s]), mat);
-      tube.renderOrder = 4; g.add(tube);
+      const curve = new THREE.CatmullRomCurve3(pts, closed, 'centripetal', 0.5);
+      const t = new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(16, 3 * n), r, 6, closed), mat);
+      t.renderOrder = 4; g.add(t);
+    };
+    for (const s of this.strandSel) tube(s, st.nodeOffset[s], st.nodeOffset[s + 1] - st.nodeOffset[s], this.closed[s]);
+    if (this.pieceSel.size && this.nodePiece) {
+      for (const key of this.pieceSel) {                              // the nodes of a piece are consecutive along the strand
+        const [s, p] = key.split(':').map(Number); if (!(s >= 0 && s < st.S)) continue;
+        let a = -1, b = -1;
+        for (let i = st.nodeOffset[s]; i < st.nodeOffset[s + 1]; i++) if (this.nodePiece[i] === p) { if (a < 0) a = i; b = i; }
+        if (a >= 0) tube(s, a, b - a + 1, false);
+      }
     }
     this._setLayer('path', g);
   }
@@ -643,6 +686,20 @@ export class View {
     if (kind === 'knot') return { kind: 'knot', c: h.instanceId, point: h.point };
     if (kind === 'lath') { const seg = Math.floor(h.faceIndex / 8); return { kind: 'lath', seg, strand: this.st.segStrand[seg], point: h.point }; }
     return { kind: 'mesh', point: h.point };
+  }
+
+  /** the ids among `nodes` whose displayed position projects inside the client-space rectangle (x0, y0)–(x1, y1), in
+   *  front of the camera — through the model, no occlusion test (a window selection) */
+  nodesInRect(x0, y0, x1, y1, nodes) {
+    const out = new Set(), P = this.dispX; if (!P) return out;
+    const r = this.canvas.getBoundingClientRect(), v = new THREE.Vector3();
+    const nx0 = ((Math.min(x0, x1) - r.left) / r.width) * 2 - 1, nx1 = ((Math.max(x0, x1) - r.left) / r.width) * 2 - 1;
+    const ny0 = -((Math.max(y0, y1) - r.top) / r.height) * 2 + 1, ny1 = -((Math.min(y0, y1) - r.top) / r.height) * 2 + 1;
+    for (const i of nodes) {
+      v.set(P[3 * i], P[3 * i + 1], P[3 * i + 2]).project(this.camera);
+      if (v.z > -1 && v.z < 1 && v.x >= nx0 && v.x <= nx1 && v.y >= ny0 && v.y <= ny1) out.add(i);
+    }
+    return out;
   }
 
   /** frame id [s, k] of the crossing on `strand` nearest to `point` (a click on a lath) */

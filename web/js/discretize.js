@@ -329,6 +329,23 @@ export function jointCuts(joints, R, sizeOf) {
   return out;
 }
 
+/** piece index per segment: the piece that holds the segment's midpoint (arc length along the strand); 0 on strands
+ *  without joints → Int32Array(st.m). The closing segment of a closed strand counts with the last piece. */
+export function segmentPieceIndex(scene, st, X = st.X) {
+  const out = new Int32Array(st.m);
+  for (let s = 0; s < st.S; s++) {
+    const list = (scene.joints || {})[s]; if (!list || !list.length) continue;
+    const js = Float64Array.from(list).sort(), { i0, n } = strandSpan(st, s), S = arcLengths(X, i0, n);
+    for (let j = st.segOffset[s]; j < st.segOffset[s + 1]; j++) {
+      const a = st.segI0[j], b = st.segI1[j], len = Math.hypot(X[3 * b] - X[3 * a], X[3 * b + 1] - X[3 * a + 1], X[3 * b + 2] - X[3 * a + 2]);
+      out[j] = searchsorted(js, S[a - i0] + 0.5 * len, 'right');
+    }
+  }
+  return out;
+}
+/** number of pieces of strand s (joints + 1; 1 without joints) */
+export const pieceCount = (scene, s) => { const l = (scene.joints || {})[s]; return l && l.length ? l.length + 1 : 1; };
+
 /** piece index along each strand per node (np.searchsorted(joints, S, 'right')) → Int32Array(st.n) */
 export function pieceIndex(scene, st, X = st.X) {
   const out = new Int32Array(st.n);

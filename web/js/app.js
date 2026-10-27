@@ -17,7 +17,7 @@ import { View } from './view.js';
 import { initDisplay, LAYER_LABEL, SEG_LAYERS, KNOT_LAYERS } from './display_ui.js';
 import { initDiscretize } from './disc_ui.js';
 import { initProtocol } from './protocol_ui.js';
-import { discretizeParams } from './discretize.js';
+import { discretizeParams, jointPoints } from './discretize.js';
 import { exportRhino } from './export3dm.js';
 import { parseUTMCsv } from './utm.js';
 import { sectionStiffness, IxEff, IyEff, JEff, sectionArea, beamFactors, beamActivations } from './params.js';
@@ -56,7 +56,7 @@ export const A = {
   model: null, gpu: null, device: null, gpuAvailable: false, backend: 'cpu',
   running: false, busy: false, runFirst: false, runUntil: 0, gpuChunk: 64, lastSync: 0, elapsed: 0,
   results: null, baseline: null, goalSig: '', paramSig: '',
-  selection: [], lathSel: new Set(), mode: 'none',
+  selection: [], lathSel: new Set(), pieceSel: new Set(), mode: 'none',
   utm: null, utmText: null, utmName: '', probeTrace: [], replay: null,
   view: null, dirty: { results: false }, chartFull: false,
 };
@@ -89,9 +89,9 @@ function setScene(sc, meshBytes, meshName, opts = {}) {
   stopRun();
   A.scene = sc; A.meshBytes = meshBytes; A.meshName = meshName; A.sceneName = sc.name || 'scene';
   A.mesh = Mesh.fromBytes(meshBytes, meshName, sc.mesh.scale);
-  A.selection = []; A.lathSel = new Set(); A.utm = A.utm || null; A.probeTrace = [];
+  A.selection = []; A.lathSel = new Set(); A.pieceSel = new Set(); A.utm = A.utm || null; A.probeTrace = [];
   sc.discretize = discretizeParams(sc.discretize);
-  if (A.mode === 'laths') setMode('laths');
+  if (A.mode === 'laths' || A.mode === 'pieces' || A.mode === 'box') setMode(A.mode);
   rebuildTopology(opts);
   syncPanels();
   calib?.onScene(); disc?.onScene();
@@ -104,6 +104,7 @@ function rebuildTopology(opts = {}) {
   } catch (e) { status('topology failed: ' + e.message, 'warn'); A.topo = null; return; }
   A.selection = A.selection.filter(([s, k]) => A.topo.hasFrame(s, k));
   A.lathSel = new Set([...A.lathSel].filter(s => s < A.topo.nStrands));
+  A.pieceSel = new Set([...A.pieceSel].filter(k => +k.split(':')[0] < A.topo.nStrands));
   resetModel(opts);
 }
 
@@ -119,7 +120,7 @@ function resetModel(opts = {}) {
   proto?.reset();
   if (A.backend === 'webgpu') makeGpu();
   view.setModel({ topo: A.topo, st: A.model.st, scene: A.scene }, { keepCamera: !!opts.keepCamera });
-  view.setStrandSelection(A.lathSel);
+  view.setStrandSelection(A.lathSel); view.setPieceSelection(A.pieceSel);
   knots?.onModel();
   refreshOverlays(); display.applyColouring(); display.refreshJoints(); display.refreshDiagram(); drawChart(); updateStatus(); updateSummaries(); updateResetTitle();
 }
@@ -167,7 +168,7 @@ async function exclusive(fn) { await waitIdle(); A.busy = true; try { return awa
 function goalSignature() {
   const sc = A.scene; if (!sc) return '';
   const c = { ...sc.contact }; delete c.locked;
-  return JSON.stringify({ loads: sc.loads, anchors: sc.anchors, material: sc.material, section: sc.section, beam: sc.beam, contact: c, hybrid: sc.hybrid, mass_scale: sc.solver.mass_scale, prestress: sc.solver.prestress });
+  return JSON.stringify({ loads: sc.loads, anchors: sc.anchors, material: sc.material, section: sc.section, beam: sc.beam, contact: c, hybrid: sc.hybrid, joints: sc.hasPieceGroups ? sc.joints : null, mass_scale: sc.solver.mass_scale, prestress: sc.solver.prestress });
 }
 function paramSignature() { const sc = A.scene; return sc ? JSON.stringify({ solver: sc.solver, contact: sc.contact }) : ''; }
 
@@ -348,12 +349,21 @@ function resultsJSON() {
   const knot = {}; for (const [k, v] of Object.entries(r.knot)) { const m = {}; st.knotEdges.forEach((e, c) => { m[String(e)] = v[c]; }); knot[k] = m; }
   const disp = []; for (let s = 0; s < st.S; s++) { const rows = []; for (let i = st.nodeOffset[s]; i < st.nodeOffset[s + 1]; i++) rows.push([r.disp[3 * i], r.disp[3 * i + 1], r.disp[3 * i + 2]]); disp.push(rows); }
   const reactions = {}; for (const [fk, v] of r.reactions) { const [s, k] = fsplit(fk); reactions[`${s},${k}`] = v; }
-  return { iterations: r.iterations, converged: r.converged, note: `WeaveSim Web (${A.backend})`, energies: r.energies, segment: seg, knot, node: { disp }, reactions, units: A.scene.units.toJSON(), topology: { strands: topo.nStrands, knots: topo.nKnots } };
+  // the discretisation, when there is one: the parameters, the joints per strand (arc length from the strand start) and
+  // their points on the current geometry, with the pieces' lath groups
+  let joints = null;
+  const J = A.scene.joints || {};
+  if (Object.values(J).some(v => v && v.length)) {
+    const pts = jointPoints(A.scene, st).map(j => ({ strand: j.s, s: j.sj, point: j.p.map(v => +v.toFixed(4)), curvature: j.kappa }));
+    const pieces = {}; for (const [s, list] of Object.entries(J)) if (list && list.length) pieces[s] = Array.from({ length: list.length + 1 }, (_, p) => A.scene.pieceGroup(+s, p));
+    joints = { params: A.scene.discretize, by_strand: J, points: pts, piece_groups: pieces };
+  }
+  return { iterations: r.iterations, converged: r.converged, note: `WeaveSim Web (${A.backend})`, energies: r.energies, segment: seg, knot, node: { disp }, reactions, ...(joints ? { joints } : {}), units: A.scene.units.toJSON(), topology: { strands: topo.nStrands, knots: topo.nKnots } };
 }
 
 // =========================================================================================================== overlays
 function frameNode(s, k) { return A.model?.st.nodeFrameIds.get(fkey(s, k)); }
-function refreshOverlays() {
+function refreshOverlays(opts = {}) {
   if (!A.model) return;
   const sc = A.scene, st = A.model.st;
   const loads = [];
@@ -372,7 +382,7 @@ function refreshOverlays() {
   if (pr) { const nid = frameNode(pr.frame[0], pr.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: pr.axis || [0, 0, -1], label: 'probe', color: cssv('--accent') }); }
   for (const p of calib?.probeMarkers?.() || []) { const nid = frameNode(p.frame[0], p.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: p.axis, label: p.label, color: p.color }); }
   view.setOverlays({ loads, anchors, selection, probes, knotMarks: knots ? knots.marks() : [], frames: view.visible.frames, arrowScale: +$('sl-arrow').value });
-  updateSelectionReadouts(); renderLists(); updateSummaries();
+  updateSelectionReadouts(); if (!opts.keepLists) renderLists(); updateSummaries();
 }
 
 // =========================================================================================================== selection & picking
@@ -390,18 +400,57 @@ function updateSelectionReadouts() {
   const txt = n ? `selection: ${n} frame(s) · last (${last[0]}, ${last[1]}) ${A.topo.isOver(last[0], last[1]) ? 'over' : 'under'}` : 'select in the view: click a lath next to a crossing (its own frame), shift-click adds / removes, Esc clears';
   qsa('.sel-readout').forEach(el => { el.textContent = txt; });
   $('btn-addload').textContent = `Add to selection (${n})`; $('btn-addanchor').textContent = `Add for selection (${n})`;
-  updateAssignReadout();
+  updateAssignReadout(); updateZExtent();
+}
+/** the height range of the crossing frames as displayed (the placeholders of the Z-range boxes) */
+function updateZExtent() {
+  const st = A.model?.st, P = view.dispX; if (!st || !P) return;
+  let lo = Infinity, hi = -Infinity, n = 0;
+  for (const nid of st.nodeFrameIds.values()) { const z = P[3 * nid + 2]; if (z < lo) lo = z; if (z > hi) hi = z; n++; }
+  if (!n) { $('ro-zrange').textContent = ''; return; }
+  $('nb-zlo').placeholder = fmt(lo, 4); $('nb-zhi').placeholder = fmt(hi, 4);
+  $('ro-zrange').textContent = `crossing frames between Z ${fmt(lo, 4)} and ${fmt(hi, 4)} ${A.scene.units.length} (${n} frames) — an empty box means that end`;
+}
+/** frames whose displayed height is within [lo, hi] (empty boxes: the model's extent); shift adds to the selection */
+function selectZRange(add = false) {
+  const st = A.model?.st, P = view.dispX; if (!st || !P) return;
+  const lo = $('nb-zlo').value === '' ? -Infinity : +$('nb-zlo').value, hi = $('nb-zhi').value === '' ? Infinity : +$('nb-zhi').value;
+  if (!(lo <= hi)) { status('Z range: the lower bound is above the upper one', 'warn'); return; }
+  const frames = []; for (const [fk, nid] of st.nodeFrameIds) { const z = P[3 * nid + 2]; if (z >= lo && z <= hi) frames.push(fsplit(fk)); }
+  mergeSelection(frames, add ? 'add' : 'replace');
+  status(`${frames.length} frame(s) between Z ${Number.isFinite(lo) ? fmt(lo, 4) : '−∞'} and ${Number.isFinite(hi) ? fmt(hi, 4) : '∞'}${add ? ' added' : ' selected'}`);
+}
+/** a window selection: the frames whose displayed node projects inside the rectangle (shift adds, alt removes) */
+function boxSelect(x0, y0, x1, y1, add = false, remove = false) {
+  const st = A.model?.st; if (!st) return;
+  const inside = view.nodesInRect(x0, y0, x1, y1, st.nodeFrameIds.values());
+  const frames = []; for (const [fk, nid] of st.nodeFrameIds) if (inside.has(nid)) frames.push(fsplit(fk));
+  mergeSelection(frames, remove ? 'remove' : add ? 'add' : 'replace');
+  status(`box: ${frames.length} frame(s) ${remove ? 'removed' : add ? 'added' : 'selected'} · ${A.selection.length} selected`);
+}
+function mergeSelection(frames, how) {
+  const cur = new Map(A.selection.map(f => [selKey(f), f]));
+  if (how === 'replace') cur.clear();
+  for (const f of frames) { if (how === 'remove') cur.delete(selKey(f)); else cur.set(selKey(f), [f[0] | 0, f[1] | 0]); }
+  A.selection = [...cur.values()];
+  refreshOverlays();
 }
 function lathsToAssign() { return [...A.lathSel].sort((a, b) => a - b); }
+function piecesToAssign() { return [...A.pieceSel].sort((a, b) => { const [sa, pa] = a.split(':').map(Number), [sb, pb] = b.split(':').map(Number); return sa - sb || pa - pb; }); }
 function updateAssignReadout() {
   if (!A.scene?.hybrid.enabled) return;
-  const L = lathsToAssign(), g = +$('sel-group').value || 1;
-  $('ro-assign').textContent = L.length ? `${L.length} lath${L.length === 1 ? '' : 's'}: ${L.slice(0, 14).join(', ')}${L.length > 14 ? ' …' : ''}` : 'no laths selected';
-  $('btn-assign').textContent = `Assign ${L.length || ''} to group ${g}`.replace('  ', ' ');
-  $('btn-assign').disabled = !L.length;
+  const L = lathsToAssign(), Pc = piecesToAssign(), g = +$('sel-group').value || 1, n = L.length + Pc.length;
+  const parts = [];
+  if (L.length) parts.push(`${L.length} lath${L.length === 1 ? '' : 's'}: ${L.slice(0, 12).join(', ')}${L.length > 12 ? ' …' : ''}`);
+  if (Pc.length) parts.push(`${Pc.length} piece${Pc.length === 1 ? '' : 's'} (lath:piece): ${Pc.slice(0, 8).join(', ')}${Pc.length > 8 ? ' …' : ''}`);
+  $('ro-assign').textContent = parts.join(' · ') || 'no laths or pieces selected';
+  $('btn-assign').textContent = `Assign ${n || ''} to group ${g}`.replace('  ', ' ');
+  $('btn-assign').disabled = !n;
 }
 /** the laths selected for a group assignment (LocalSH: the others dimmed, a tube along each selected lath) */
 function setLathSelection(strands) { A.lathSel = new Set(strands); view.setStrandSelection(A.lathSel); updateAssignReadout(); }
+/** the pieces (between the joints of a discretisation) selected for a group assignment, keys "strand:piece" */
+function setPieceSelection(keys) { A.pieceSel = new Set(keys); view.setPieceSelection(A.pieceSel); updateAssignReadout(); }
 
 function frameAtPick(p) {
   if (!p) return null;
@@ -425,6 +474,16 @@ function onPick(ev) {
     const next = new Set(A.lathSel); if (next.has(s)) next.delete(s); else next.add(s);
     setLathSelection(next);
     status(`lath ${s} ${next.has(s) ? 'selected' : 'removed'} · ${next.size} selected · group ${A.scene.strandGroup(s)}`);
+    return;
+  }
+  if (A.mode === 'pieces') {                                         // a piece between the joints of a discretisation
+    let s = null, pc = 0;
+    if (p && p.kind === 'lath') { s = p.strand; pc = view.pieceOfSegment(p.seg); }
+    else if (p && p.kind === 'knot') { const f = frameAtPick(p); if (f) { s = f[0]; pc = view.pieceOfNode(frameNode(f[0], f[1])); } }
+    if (s === null) { if (!ev.shiftKey && A.pieceSel.size) { setPieceSelection([]); status('piece selection cleared'); } return; }
+    const key = `${s}:${pc}`, next = new Set(A.pieceSel); if (next.has(key)) next.delete(key); else next.add(key);
+    setPieceSelection(next);
+    status(`lath ${s} piece ${pc} ${next.has(key) ? 'selected' : 'removed'} · ${next.size} selected · group ${A.scene.pieceGroup(s, pc)}`);
     return;
   }
   const f = frameAtPick(p);
@@ -452,22 +511,30 @@ function onPick(ev) {
 }
 
 let colourBeforeLaths = null;
+const groupPicking = (m) => m === 'laths' || m === 'pieces';
 function setMode(m) {
   const was = A.mode;
   A.mode = A.mode === m ? 'none' : m;
   $('btn-flipmode').classList.toggle('on', A.mode === 'flip');
   $('btn-probemode').classList.toggle('on', A.mode === 'probe');
   $('btn-lathmode').classList.toggle('on', A.mode === 'laths');
-  // lath selection: colour by lath group while picking (back to the previous colouring afterwards)
-  if (A.mode === 'laths' && was !== 'laths') { const c = $('sel-colour').value; if (!LAYER_LABEL[c] && c !== 'group') { colourBeforeLaths = c; $('sel-colour').value = 'group'; display.applyColouring(); } }
-  if (was === 'laths' && A.mode !== 'laths') {
-    if (A.lathSel.size) setLathSelection([]);                       // what is highlighted is what Assign takes: nothing outside the mode
+  $('btn-piecemode').classList.toggle('on', A.mode === 'pieces');
+  $('btn-boxmode').classList.toggle('on', A.mode === 'box');
+  $('btn-selgroup').textContent = A.mode === 'pieces' ? 'pieces of group' : 'laths of group';
+  view.setLeftDrag(A.mode !== 'box');                                 // the box selection takes the left drag
+  // lath / piece selection: colour by lath group while picking (back to the previous colouring afterwards)
+  if (groupPicking(A.mode) && !groupPicking(was)) { const c = $('sel-colour').value; if (!LAYER_LABEL[c] && c !== 'group') { colourBeforeLaths = c; $('sel-colour').value = 'group'; display.applyColouring(); } }
+  if (groupPicking(was) && !groupPicking(A.mode)) {
+    if (A.lathSel.size) setLathSelection([]);                       // what is highlighted is what Assign takes: nothing outside the modes
+    if (A.pieceSel.size) setPieceSelection([]);
     if (colourBeforeLaths) { $('sel-colour').value = colourBeforeLaths; colourBeforeLaths = null; display.applyColouring(); }
   }
   const banner = $('mode-banner');
   banner.hidden = A.mode === 'none';
   banner.textContent = A.mode === 'flip' ? 'FLIP — click a lath at a crossing to swap over / under (Esc leaves)' : A.mode === 'probe' ? 'PROBE — click the lath at the probe crossing (Esc leaves)'
-    : A.mode === 'laths' ? 'LATHS — click laths to add / remove them, then Assign (3 Units & material) · Esc leaves' : '';
+    : A.mode === 'laths' ? 'LATHS — click laths to add / remove them, then Assign (3 Units & material) · Esc leaves'
+    : A.mode === 'pieces' ? 'PIECES — click pieces between the joints to add / remove them, then Assign (3 Units & material) · Esc leaves'
+    : A.mode === 'box' ? 'BOX — drag a rectangle around the crossings to select their frames (shift adds, alt removes; click picks one) · Esc leaves' : '';
   $('gl').classList.toggle('arm', A.mode !== 'none');
 }
 export function setPickBanner(text) { const b = $('mode-banner'); b.hidden = !text; b.textContent = text || ''; $('gl').classList.toggle('arm', !!text); }
@@ -588,7 +655,7 @@ function updateSummaries() {
   const sc = A.scene; if (!sc) return;
   $('sum-file').textContent = A.sceneName;
   $('sum-weave').textContent = A.topo ? `${A.topo.nStrands} strands · ${A.topo.nKnots} knots` : '';
-  $('sum-material').textContent = `${sc.units} · E ${fmt(sc.material.E, 3)} · ${fmt(sc.section.width, 4)}×${fmt(sc.section.height, 4)}`;
+  $('sum-material').textContent = `${sc.units} · E ${fmt(sc.material.E, 3)} · ${fmt(sc.section.width, 4)}×${fmt(sc.section.height, 4)}${sc.hasPieceGroups ? ` · ${Object.keys(sc.hybrid.pieces).length} piece${Object.keys(sc.hybrid.pieces).length === 1 ? '' : 's'}` : ''}`;
   $('sum-contact').textContent = `μ ${fmt(sc.contact.mu, 3)} · k ${fmt(sc.contact.strength, 3)}${sc.contact.locked ? ' · locked' : ''}`;
   $('sum-loads').textContent = `${sc.loads.gravity.enabled ? 'gravity · ' : ''}${sc.loads.point.length} point`;
   $('sum-anchors').textContent = `${sc.anchors.length} anchor${sc.anchors.length === 1 ? '' : 's'}`;
@@ -596,10 +663,26 @@ function updateSummaries() {
   $('sum-utm').textContent = probeOf(sc) ? `probe (${sc.utm.probe.frame})` : '';
 }
 
+const numStr = (v) => (Number.isFinite(v) ? String(+(+v).toPrecision(6)) : '');
+/** one point load as an editable row: the components in the load's space (world, or the frame axes X width / Y normal /
+ *  Z tangent) and the magnitude, which rescales the vector */
+function loadRow(pl, i, u) {
+  const comps = ['x', 'y', 'z'].map((c, k) => `<input type="number" class="num" step="any" value="${numStr(pl.F[k])}" data-ld-f="${i}" data-c="${k}" aria-label="F${c} of load ${i}" title="F${c}">`).join('');
+  return `<div class="item load" data-load="${i}"><span class="grow">${i}: (${pl.frame})</span>` +
+    `<select data-ld-space="${i}" title="world vector, or components in the frame axes (X width, Y normal, Z tangent)"><option value="world"${pl.space === 'world' ? ' selected' : ''}>world</option><option value="local"${pl.space === 'local' ? ' selected' : ''}>frame</option></select>` +
+    `<button class="lnk" data-sel-load="${i}">select</button><button class="x" data-del-load="${i}" title="remove">×</button>` +
+    `<div class="vec"><span>F</span>${comps}<span>|F|</span><input type="number" class="num mag" step="any" value="${numStr(Math.hypot(...pl.F))}" data-ld-mag="${i}" aria-label="magnitude of load ${i}" title="magnitude — rescales the vector"><span>${u.force}</span></div></div>`;
+}
+/** the row of load i follows its vector (after an edit of a component or of the magnitude) */
+function syncLoadRow(i) {
+  const row = $('list-loads').querySelector(`.item[data-load="${i}"]`), pl = A.scene.loads.point[i]; if (!row || !pl) return;
+  row.querySelectorAll('[data-ld-f]').forEach(inp => { inp.value = numStr(pl.F[+inp.dataset.c]); });
+  row.querySelector('[data-ld-mag]').value = numStr(Math.hypot(...pl.F));
+}
 function renderLists() {
   const sc = A.scene; if (!sc) return;
   const u = sc.units;
-  $('list-loads').innerHTML = sc.loads.point.map((pl, i) => `<div class="item"><span class="grow">${i}: (${pl.frame}) F=[${pl.F.map(v => fmt(v, 3)).join(', ')}] ${pl.space} |F|=${fmt(Math.hypot(...pl.F), 3)} ${u.force}</span><button class="lnk" data-sel-load="${i}">select</button><button class="x" data-del-load="${i}" title="remove">×</button></div>`).join('') || '<div class="hint">no point loads</div>';
+  $('list-loads').innerHTML = sc.loads.point.map((pl, i) => loadRow(pl, i, u)).join('') || '<div class="hint">no point loads</div>';
   $('list-anchors').innerHTML = sc.anchors.map((a, i) => `<div class="item"><span class="grow">${i}: ${selectorLabel(a.select).padEnd(16)} ${fixLabel(a.fix)}</span><button class="lnk" data-sel-anchor="${i}">select</button><button class="x" data-del-anchor="${i}" title="remove">×</button></div>`).join('') || '<div class="hint">no anchors — the model is free</div>';
 }
 
@@ -704,6 +787,7 @@ async function readFileList(files) {
   } else if (meshes.length) {
     const m = meshes[0], sc = A.scene ? Scene.fromJSON(A.scene.toJSON(), m.name.replace(/\.\w+$/, '')) : new Scene();
     sc.mesh = { path: m.name, scale: 1.0 }; sc.weave.flip_knots = []; sc.anchors = A.scene ? sc.anchors : [];
+    sc.joints = {}; sc.hybrid.pieces = {};                            // joints and piece groups belong to the previous mesh's strands
     if (!A.scene) { sc.addAnchor({ type: 'all_start' }, [1, 1, 1, 0, 0, 0], 'starts'); sc.addAnchor({ type: 'all_end' }, [1, 1, 1, 0, 0, 0], 'ends'); }
     sc.name = m.name.replace(/\.\w+$/, '');
     setScene(sc, new Uint8Array(await m.arrayBuffer()), m.name);
@@ -784,6 +868,7 @@ async function init() {
     readLockBox: () => readBound($('ck-locked')), drawChart: () => drawChart(), updateSummaries: () => updateSummaries(),
     refreshViews: () => { if (A.model) view.updateGeometry(A.model.st); display.applyColouring(); display.refreshDiagram(); } });
   view.attachNav($('navcube'));
+  { const js = +store.get('jointStroke', 3.5) || 3.5; $('sl-jstroke').value = js; $('out-jstroke').textContent = js.toFixed(1); view.setJointStroke(js); }
   const theme = store.get('theme', 'auto'); setTheme(theme);
   bindNav(); bindPanels();
   A.device = await getDevice(); A.gpuAvailable = !!A.device;
@@ -826,15 +911,27 @@ function bindNav() {
   $('nav-proj').onclick = () => { view.setProjection(view.projection === 'persp' ? 'ortho' : 'persp'); $('nav-proj').querySelector('.ic-persp').hidden = view.projection !== 'persp'; $('nav-proj').querySelector('.ic-ortho').hidden = view.projection === 'persp'; };
   const q = Math.PI / 2;
   $('nav-left').onclick = () => view.orbitBy(q, 0); $('nav-right').onclick = () => view.orbitBy(-q, 0); $('nav-up').onclick = () => view.orbitBy(0, -q); $('nav-down').onclick = () => view.orbitBy(0, q);
-  const gl = $('gl');
-  let down = null;
-  gl.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY }; });
-  gl.addEventListener('pointerup', (e) => { if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5 && e.button === 0) onPick(e); down = null; });
-  gl.addEventListener('pointermove', onHover);
+  const gl = $('gl'), mq = $('marquee'), vp0 = $('viewport');
+  let down = null, box = null;                                       // box: the marquee of a box selection (box mode, left button)
+  gl.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY }; box = A.mode === 'box' && e.button === 0 ? { x: e.clientX, y: e.clientY, on: false } : null; });
+  gl.addEventListener('pointermove', (e) => {
+    onHover(e);
+    if (!box) return;
+    if (!box.on && Math.hypot(e.clientX - box.x, e.clientY - box.y) > 3) { box.on = true; mq.hidden = false; }
+    if (box.on) {
+      const r = vp0.getBoundingClientRect();
+      mq.style.left = `${Math.min(box.x, e.clientX) - r.left}px`; mq.style.top = `${Math.min(box.y, e.clientY) - r.top}px`;
+      mq.style.width = `${Math.abs(e.clientX - box.x)}px`; mq.style.height = `${Math.abs(e.clientY - box.y)}px`;
+    }
+  });
+  const endBox = (e, apply) => { if (!box) return false; const b = box; box = null; mq.hidden = true; if (apply && b.on) boxSelect(b.x, b.y, e.clientX, e.clientY, e.shiftKey, e.altKey); return b.on; };
+  gl.addEventListener('pointerup', (e) => { const dragged = endBox(e, true); if (!dragged && down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5 && e.button === 0) onPick(e); down = null; });
+  gl.addEventListener('pointercancel', (e) => { endBox(e, false); down = null; });
   gl.addEventListener('pointerleave', () => { $('tooltip').hidden = true; });
   window.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, select, textarea')) return;
-    if (e.key === 'Escape') { if (knots?.picking()) knots.cancelPick(); else if (A.mode !== 'none') setMode(A.mode); else if (calib?.pickMode?.()) calib.cancelPick(); else if (A.lathSel.size) setLathSelection([]); else select([]); }
+    if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
+    if (e.key === 'Escape') { if (knots?.picking()) knots.cancelPick(); else if (A.mode !== 'none') setMode(A.mode); else if (calib?.pickMode?.()) calib.cancelPick(); else if (A.lathSel.size || A.pieceSel.size) { setLathSelection([]); setPieceSelection([]); } else select([]); }
+    else if (e.key === 'b' || e.key === 'B') $('btn-boxmode').click();
     else if (e.key === 'h' || e.key === 'H') view.home();
     else if (e.key === 'f' || e.key === 'F') view.fit();
     else if (e.key === 't' || e.key === 'T') $('nav-turn').click();
@@ -882,15 +979,31 @@ function bindPanels() {
   $('sel-group').onchange = () => { syncPanels(); updateAssignReadout(); };
   $('tx-grpname').onchange = (e) => { const g = +$('sel-group').value; if (g >= 2) { A.scene.group(g).name = e.target.value; syncPanels(); } };
   $('btn-assign').onclick = () => {
-    const g = +$('sel-group').value, strands = lathsToAssign();
-    if (!strands.length) { status('select laths first: Select laths… and click them in the view', 'warn'); return; }
-    A.scene.assignStrands(strands, g); A.lathSel = new Set(); A.selection = [];
-    rebuildTopology({ keepCamera: true }); syncPanels(); updateAssignReadout();
-    status(g >= 2 ? `${strands.length} lath(s) → group ${g}` : `${strands.length} lath(s) back to group 1`);
+    const g = +$('sel-group').value, strands = lathsToAssign(), pieces = piecesToAssign();
+    if (!strands.length && !pieces.length) { status('select laths or pieces first: Select laths… / Select pieces… and click them in the view', 'warn'); return; }
+    A.scene.assignStrands(strands, g); A.scene.assignPieces(pieces, g); A.lathSel = new Set(); A.pieceSel = new Set(); A.selection = [];
+    // whole laths change the knot pre-offsets (their height) → the topology; pieces only the model (sections at the crossings, stiffness)
+    if (strands.length) rebuildTopology({ keepCamera: true }); else resetModel({ keepCamera: true });
+    syncPanels(); updateAssignReadout();
+    const what = [strands.length ? `${strands.length} lath(s)` : '', pieces.length ? `${pieces.length} piece(s)` : ''].filter(Boolean).join(' + ');
+    status(g >= 2 ? `${what} → group ${g}` : `${what} back to group 1`);
   };
   $('btn-lathmode').onclick = () => setMode('laths');
-  $('btn-selgroup').onclick = () => { if (A.mode !== 'laths') setMode('laths'); const g = +$('sel-group').value || 1; setLathSelection(Array.from({ length: A.topo.nStrands }, (_, s) => s).filter(s => A.scene.strandGroup(s) === g)); };
-  $('btn-lathclear').onclick = () => setLathSelection([]);
+  $('btn-piecemode').onclick = () => {
+    if (A.mode !== 'pieces' && !display.hasJoints()) { status('no joints yet — run the discretisation first (Monitor › Discretisation › Run), then pick pieces', 'warn'); return; }
+    setMode('pieces');
+  };
+  $('btn-selgroup').onclick = () => {
+    const g = +$('sel-group').value || 1;
+    if (A.mode === 'pieces') {                                       // the pieces assigned to the edited group (group 1: none — it is the default)
+      const keys = Object.entries(A.scene.hybrid.pieces).filter(([, v]) => v === g).map(([k]) => k);
+      setPieceSelection(keys); if (!keys.length) status(g === 1 ? 'group 1 is the default: no piece is assigned to it explicitly' : `no piece is assigned to group ${g}`);
+      return;
+    }
+    if (A.mode !== 'laths') setMode('laths');
+    setLathSelection(Array.from({ length: A.topo.nStrands }, (_, s) => s).filter(s => A.scene.strandGroup(s) === g));
+  };
+  $('btn-lathclear').onclick = () => { setLathSelection([]); setPieceSelection([]); };
   qsa('[data-bind]').forEach(el => { el.addEventListener(el.type === 'range' ? 'input' : 'change', () => writeBound(el)); });
   $('sel-beammode').onchange = (e) => {
     const g = A.scene.group(+$('sel-group').value || 1), b = g.beam;
@@ -929,9 +1042,26 @@ function bindPanels() {
     if (t.dataset.delLoad != null) { A.scene.loads.point.splice(+t.dataset.delLoad, 1); refreshOverlays(); onSceneEdited(); }
     else if (t.dataset.selLoad != null) { const pl = A.scene.loads.point[+t.dataset.selLoad]; select([pl.frame]); }
   };
+  // a component, the magnitude or the space of a load edited in its row: applied live (loads are a goal edit)
+  $('list-loads').addEventListener('change', (e) => {
+    const t = e.target, L = A.scene.loads.point;
+    let i;
+    if (t.dataset.ldF != null) { i = +t.dataset.ldF; const v = +t.value; if (!Number.isFinite(v)) { syncLoadRow(i); return; } L[i].F[+t.dataset.c] = v; }
+    else if (t.dataset.ldMag != null) {
+      i = +t.dataset.ldMag; const m = +t.value, cur = Math.hypot(...L[i].F);
+      if (!Number.isFinite(m) || m < 0) { syncLoadRow(i); return; }
+      L[i].F = cur > 1e-12 ? L[i].F.map(c => c / cur * m) : [0, 0, -m];       // a zero vector grows along −Z
+    } else if (t.dataset.ldSpace != null) { i = +t.dataset.ldSpace; L[i].space = t.value; }
+    else return;
+    syncLoadRow(i); refreshOverlays({ keepLists: true }); onSceneEdited();
+    status(`load ${i}: F = [${L[i].F.map(v => fmt(v, 3)).join(', ')}] ${L[i].space} · |F| ${fmt(Math.hypot(...L[i].F), 3)} ${A.scene.units.force}`);
+  });
   // anchors
   $('btn-sel-start').onclick = () => select(A.topo.startFrames()); $('btn-sel-end').onclick = () => select(A.topo.endFrames());
   $('btn-sel-bnd').onclick = () => select(A.topo.boundaryFrames()); $('btn-sel-clear').onclick = () => select([]);
+  $('btn-sel-z').onclick = (e) => selectZRange(e.shiftKey);
+  ['nb-zlo', 'nb-zhi'].forEach(id => $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') selectZRange(e.shiftKey); }));
+  $('btn-boxmode').onclick = () => setMode('box');
   const fixMask = () => qsa('#fix-dofs input[data-dof]').sort((a, b) => a.dataset.dof - b.dataset.dof).map(c => (c.checked ? 1 : 0));
   $('btn-pin').onclick = () => qsa('#fix-dofs input[data-dof]').forEach(c => { c.checked = +c.dataset.dof < 3; });
   $('btn-fixed').onclick = () => qsa('#fix-dofs input[data-dof]').forEach(c => { c.checked = true; });
@@ -965,6 +1095,7 @@ function bindPanels() {
   qsa('#layer-chips .chip').forEach(c => { c.onclick = () => { c.classList.toggle('on'); view.setVisible(c.dataset.layer, c.classList.contains('on')); if (c.dataset.layer === 'frames') refreshOverlays(); }; });
   $('sl-deform').oninput = (e) => { $('out-deform').textContent = e.target.value; view.setDeform(+e.target.value); display.refreshJoints(); display.refreshDiagram(); };
   $('sl-arrow').oninput = (e) => { $('out-arrow').textContent = (+e.target.value).toFixed(1); refreshOverlays(); };
+  $('sl-jstroke').oninput = (e) => { const v = +e.target.value; $('out-jstroke').textContent = v.toFixed(1); view.setJointStroke(v); store.set('jointStroke', v); };
   $('sl-turn').oninput = (e) => { $('out-turn').textContent = e.target.value; if (view.turntable) view.setTurntable(true, +e.target.value); };
   // modal
   $('modal-close').onclick = () => { $('modal').hidden = true; };

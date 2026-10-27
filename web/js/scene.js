@@ -4,6 +4,11 @@ import { UnitSystem } from './units.js';
 import {
   MATERIAL, SECTION, CONTACT, BEAM, SOLVER, WEAVE, fromDict, rescaleMaterial, rescaleSection, rescaleContact, rescaleWeave,
 } from './params.js';
+import { pieceIndex, segmentPieceIndex, pieceCount } from './discretize.js';
+
+/** key of piece p (0-based along the strand, between its joints) of strand s in hybrid.pieces */
+export const pieceKey = (s, p) => `${s | 0}:${p | 0}`;
+const parsePieceKey = (k) => { const m = /^(\d+):(\d+)$/.exec(String(k)); return m ? [+m[1], +m[2]] : null; };
 
 export const SCENE_VERSION = 1;
 export const DOF_NAMES = ['X', 'Y', 'Z', 'rX', 'rY', 'rZ'];
@@ -30,7 +35,7 @@ export class Scene {
     this.solver = fromDict(SOLVER);
     this.discretize = null;                     // kept verbatim for the Python tools (joint placement)
     this.joints = {};
-    this.hybrid = { enabled: false, groups: [], assign: {} };
+    this.hybrid = { enabled: false, groups: [], assign: {}, pieces: {} };   // pieces: "strand:piece" → group (2…) overriding the strand's group for that piece of a discretisation
     this.loads = { gravity: { enabled: true, direction: [0, 0, -1] }, udl: { enabled: false, q: [0, 0, 0], per: 'length' }, point: [] };
     this.anchors = [];
     this.utm = { path: null, mode: 'overlay', probe: null, columns: { force: null, displacement: null }, units: { force: 'N', length: 'mm' }, pad_stiffness: 0.0 };
@@ -51,6 +56,34 @@ export class Scene {
     return g >= 2 && g <= this.nGroups ? g : 1;
   }
   heightOfStrand(s) { return +this.group(this.strandGroup(s)).section.height; }
+  /** group of piece p of strand s: its own assignment, else the strand's */
+  pieceGroup(s, p) {
+    if (!this.hybrid.enabled) return 1;
+    const g = +(this.hybrid.pieces[pieceKey(s, p)] ?? 0);
+    return g >= 2 && g <= this.nGroups ? g : this.strandGroup(s);
+  }
+  get hasPieceGroups() { return this.hybrid.enabled && Object.keys(this.hybrid.pieces).length > 0; }
+  assignPieces(keys, g) { for (const k of keys) { if (g >= 2) this.hybrid.pieces[k] = g; else delete this.hybrid.pieces[k]; } }
+  /** drop piece assignments that no longer point at a piece (the joints changed or went) */
+  prunePieces() {
+    for (const k of Object.keys(this.hybrid.pieces)) { const sp = parsePieceKey(k); if (!sp || sp[1] >= pieceCount(this, sp[0])) delete this.hybrid.pieces[k]; }
+  }
+  /** group per segment of a built state (the strand's group, or the piece's where a piece is assigned) → Int32Array(st.m) */
+  segmentGroups(st, X = st.X) {
+    const out = new Int32Array(st.m);
+    if (!this.hasPieceGroups) { for (let j = 0; j < st.m; j++) out[j] = this.strandGroup(st.segStrand[j]); return out; }
+    const pc = segmentPieceIndex(this, st, X);
+    for (let j = 0; j < st.m; j++) out[j] = this.pieceGroup(st.segStrand[j], pc[j]);
+    return out;
+  }
+  /** group per node (the piece that holds the node) → Int32Array(st.n) */
+  nodeGroups(st, X = st.X) {
+    const out = new Int32Array(st.n);
+    if (!this.hasPieceGroups) { for (let i = 0; i < st.n; i++) out[i] = this.strandGroup(st.nodeStrand[i]); return out; }
+    const pc = pieceIndex(this, st, X);
+    for (let i = 0; i < st.n; i++) out[i] = this.pieceGroup(st.nodeStrand[i], pc[i]);
+    return out;
+  }
   setNGroups(n) {
     n = Math.max(1, n | 0);
     while (1 + this.hybrid.groups.length < n) {
@@ -59,6 +92,7 @@ export class Scene {
     }
     this.hybrid.groups.length = Math.max(n - 1, 0);
     for (const s of Object.keys(this.hybrid.assign)) if (this.hybrid.assign[s] > n) delete this.hybrid.assign[s];
+    for (const k of Object.keys(this.hybrid.pieces)) if (this.hybrid.pieces[k] > n) delete this.hybrid.pieces[k];
   }
   assignStrands(strands, g) { for (const s of strands) { if (g >= 2) this.hybrid.assign[s] = g; else delete this.hybrid.assign[s]; } }
 
@@ -89,7 +123,8 @@ export class Scene {
       material: this.material, section: this.section, contact: this.contact, beam: this.beam, solver: this.solver,
       ...(this.discretize ? { discretize: this.discretize } : {}),
       joints: this.joints,
-      hybrid: { enabled: this.hybrid.enabled, groups: this.hybrid.groups, assign: Object.fromEntries(Object.entries(this.hybrid.assign).map(([k, v]) => [String(k), v | 0])) },
+      hybrid: { enabled: this.hybrid.enabled, groups: this.hybrid.groups, assign: Object.fromEntries(Object.entries(this.hybrid.assign).map(([k, v]) => [String(k), v | 0])),
+        ...(Object.keys(this.hybrid.pieces).length ? { pieces: Object.fromEntries(Object.entries(this.hybrid.pieces).map(([k, v]) => [String(k), v | 0])) } : {}) },
       loads: this.loads,
       anchors: this.anchors.map(a => ({ select: a.select, fix: a.fix.map(f => (f ? 1 : 0)), name: a.name || '' })),
       utm: this.utm,
@@ -126,6 +161,7 @@ export class Scene {
       enabled: !!h.enabled,
       groups: (h.groups || []).map(g => ({ name: g.name || '', material: fromDict(MATERIAL, g.material), section: fromDict(SECTION, g.section), beam: fromDict(BEAM, g.beam) })),
       assign: Object.fromEntries(Object.entries(h.assign || {}).map(([k, v]) => [k | 0, v | 0])),
+      pieces: Object.fromEntries(Object.entries(h.pieces || {}).filter(([k, v]) => parsePieceKey(k) && (v | 0) >= 2).map(([k, v]) => [String(k), v | 0])),
     };
     const L = d.loads || {};
     sc.loads = {

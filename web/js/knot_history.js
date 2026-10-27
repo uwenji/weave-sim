@@ -27,10 +27,11 @@ export class KnotHistory {
       this.kA[c] = st.nodeFrameIds.get(fkey(...kn.a)); this.kB[c] = st.nodeFrameIds.get(fkey(...kn.b));
       this.overSide[c] = topo.isOver(kn.a[0], kn.a[1]) ? 0 : 1;
     }
-    // stress σ = |N|/A + |Mx|/Wx + |My|/Wy at a node: the section of its strand, the joint at the node
+    // stress σ = |N|/A + |Mx|/Wx + |My|/Wy at a node: the section of its lath group (the strand's, or the piece's), the joint at the node
     this.Ainv = new Float64Array(n); this.Wx = new Float64Array(n); this.Wy = new Float64Array(n);
+    const gNode = scene.nodeGroups(st);
     for (let i = 0; i < n; i++) {
-      const sec = scene.group(scene.strandGroup(st.nodeStrand[i])).section;
+      const sec = scene.group(gNode[i]).section;
       this.Ainv[i] = 1 / Math.max(sectionArea(sec), 1e-300);
       this.Wx[i] = IxEff(sec) / Math.max(0.5 * sec.height, 1e-300); this.Wy[i] = IyEff(sec) / Math.max(0.5 * sec.width, 1e-300);
     }

@@ -105,7 +105,10 @@ export function initDisplay(ctx) {
       title = 'lath families (strands)'; items = [...n.keys()].sort((a, b) => a - b).map(f => ({ c: css(familyColor(f)), t: `${f >= 0 ? f : '–'} · ${n.get(f)}` }));
     } else if (sel === 'group' && topo) {
       const n = new Map(); for (let s = 0; s < topo.nStrands; s++) { const g = sc.strandGroup(s); n.set(g, (n.get(g) || 0) + 1); }
-      title = 'lath groups (strands)'; items = [...n.keys()].sort((a, b) => a - b).map(g => ({ c: css(GROUP_COLORS[(g - 1) % GROUP_COLORS.length]), t: `${(sc.group(g).name || 'group ' + g).trim()} · ${n.get(g)}` }));
+      const np = new Map(); for (const g of Object.values(sc.hybrid.pieces || {})) np.set(g, (np.get(g) || 0) + 1);   // pieces with their own group
+      title = np.size ? 'lath groups (strands + pieces)' : 'lath groups (strands)';
+      const gs = [...new Set([...n.keys(), ...np.keys()])].sort((a, b) => a - b);
+      items = gs.map(g => ({ c: css(GROUP_COLORS[(g - 1) % GROUP_COLORS.length]), t: `${(sc.group(g).name || 'group ' + g).trim()} · ${n.get(g) || 0}${np.get(g) ? ` + ${np.get(g)} piece${np.get(g) === 1 ? '' : 's'}` : ''}` }));
     } else if (sel === 'overunder') { title = 'at the nearest crossing'; items = [{ c: css(OVER_COLOR), t: 'over' }, { c: css(UNDER_COLOR), t: 'under' }]; }
     else if (sel === 'pieces' && hasJoints()) { title = 'pieces between the joints'; items = [{ c: css(PIECE_COLORS[0]), t: 'odd' }, { c: css(PIECE_COLORS[1]), t: 'even' }]; }
     if (!items.length) { lg.hidden = true; return; }
@@ -153,10 +156,12 @@ export function initDisplay(ctx) {
     const jp = jointPoints(A.scene, A.model.st, view.dispX);
     view.setJoints({ cuts: jointCuts(jp, view.nodeR, (s) => [view.secW[s], view.secH[s]]), points: jp.map(j => j.p), kappa: jp.map(j => j.kappa) });
   }
-  /** the joints changed (discretisation): overlay, piece colouring, joint-zone diagram */
+  /** the joints changed (discretisation): piece indices and per-piece groups in the view, overlay, piece / group
+   *  colouring, joint-zone diagram */
   function onJoints() {
+    A.view.refreshSections(A.scene);
     refreshJoints();
-    if ($('sel-colour').value === 'pieces') applyColouring();
+    if ($('sel-colour').value === 'pieces' || $('sel-colour').value === 'group') applyColouring();
     if (D.d !== 'none' && D.zone) refreshDiagram();
   }
 
@@ -189,8 +194,11 @@ export function initDisplay(ctx) {
       L += len;
     }
     void i0;
-    const g = sc.strandGroup(s), gname = (sc.group(g).name || '').trim();
-    const title = `<b>lath ${s}</b> · family ${topo.strands[s].family}${sc.hybrid.enabled ? ` · group ${g}${gname && gname !== `group ${g}` ? ' ' + gname : ''}` : ''}`;
+    const g = sc.strandGroup(s);
+    const gtxt = (q) => { const nm = (sc.group(q).name || '').trim(); return `group ${q}${nm && nm !== `group ${q}` ? ' ' + nm : ''}`; };
+    let piece = '';
+    if (hasJoints()) { const p = view.pieceOfSegment(j), pg = sc.pieceGroup(s, p); piece = ` · piece ${p}${sc.hybrid.enabled && pg !== g ? ` → ${gtxt(pg)}` : ''}`; }
+    const title = `<b>lath ${s}</b> · family ${topo.strands[s].family}${sc.hybrid.enabled ? ` · ${gtxt(g)}` : ''}${piece}`;
     const lines = [`s ${fmtG(sPos, 4)} of ${fmtG(L, 4)} ${u.length}`];
     const c = view.colouring, sel = $('sel-colour').value;
     let shown = false;
