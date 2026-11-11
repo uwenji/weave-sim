@@ -330,7 +330,8 @@
     <div id="drop" hidden>drop scene.json + mesh, a mesh, a UTM csv or calibration files</div>
   </main>
 
-  <!-- display tools: how the model is drawn (colour, diagram, view); a sidebar beside the view that folds to a narrow tab -->
+  <!-- display tools: how the model is drawn (colour, diagram, view); a sidebar beside the view that folds to a narrow tab,
+       docks on either side of the view and widens by its inner edge -->
   <aside id="display" aria-label="Display">
     <div class="side-head" id="display-head">
       <button id="display-toggle" class="side-toggle" title="show / hide the display tools"><span class="chev"></span><span class="t">Display</span></button>
@@ -375,7 +376,7 @@
         <button class="chip on" data-layer="laths">laths</button><button class="chip" data-layer="lines">centrelines</button><button class="chip on" data-layer="knots">knots</button>
         <button class="chip on" data-layer="mesh">mesh</button><button class="chip" data-layer="wire">wire</button><button class="chip on" data-layer="shadow">shadow</button>
         <button class="chip on" data-layer="joints">joints</button><button class="chip on" data-layer="loads">loads</button><button class="chip on" data-layer="anchors">anchors</button>
-        <button class="chip on" data-layer="probes">probes</button><button class="chip" data-layer="frames">frames</button>
+        <button class="chip on" data-layer="probes">probes</button><button class="chip" data-layer="frames">frames</button><button class="chip" data-layer="bbox" title="the axis-aligned bounding box of the laths as drawn (sections and deformation × included), dashed, with W (X), D (Y), H (Z) on its edges">bounding box</button>
       </div>
       <div class="row slider"><label for="sl-deform">deformation ×</label><input type="range" id="sl-deform" min="0" max="50" step="0.5" value="1"><output id="out-deform" class="mono">1</output></div>
       <div class="row slider"><label for="sl-arrow">arrow scale</label><input type="range" id="sl-arrow" min="0.2" max="4" step="0.1" value="1"><output id="out-arrow" class="mono">1.0</output></div>
@@ -383,13 +384,19 @@
       <div class="row slider"><label for="sl-turn">turntable °/s</label><input type="range" id="sl-turn" min="1" max="60" step="1" value="12"><output id="out-turn" class="mono">12</output></div>
       <div class="row"><label for="sel-knotpick" class="w">knot dot picks</label><select id="sel-knotpick"><option value="over">over strand</option><option value="under">under strand</option></select></div>
     </div>
+    <div id="display-resize" class="resizer" role="separator" aria-orientation="vertical" aria-label="resize the display tools" tabindex="0" title="drag to resize the display tools (double-click: default width)"></div>
   </aside>
   <!-- monitor: run controls and everything that is plotted while the model solves; folds to a narrow tab, docks on
        either side of the view, widens by its inner edge (two chart columns from ~580 px) -->
   <aside id="monitor" aria-label="Monitor">
     <div class="side-head" id="monitor-head">
       <button id="monitor-toggle" class="side-toggle" aria-expanded="true" title="show / hide the monitor"><span class="chev"></span><span class="t">Monitor</span></button>
-      <button id="monitor-mini" class="mini-run" title="Run / pause (Space)" aria-label="Run"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="ic-run" d="M3 1.8v8.4L10 6z"/><path class="ic-pause" d="M2.6 2h2.3v8H2.6zM7.1 2h2.3v8H7.1z"/></svg></button>
+      <!-- the folded Monitor's rail (or, on a phone, its header row) keeps the run controls: run / pause, step, reset -->
+      <div class="mini-ctl" role="group" aria-label="run controls">
+        <button id="monitor-mini" class="mini-run" title="Run (Space)" aria-label="Run"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="ic-run" d="M3 1.8v8.4L10 6z"/><path class="ic-pause" d="M2.6 2h2.3v8H2.6zM7.1 2h2.3v8H7.1z"/></svg></button>
+        <button id="monitor-mini-step" class="mini-run step" title="Step" aria-label="Step"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 2v8l5.6-4z"/><path d="M8.4 2h1.6v8H8.4z"/></svg></button>
+        <button id="monitor-mini-reset" class="mini-run reset" title="Reset: back to the woven geometry" aria-label="Reset"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="stroke" d="M9.5 6.6A3.6 3.6 0 1 1 8.2 3.3"/><path d="M9.9 1.4v3.7H6.2z"/></svg></button>
+      </div>
       <button id="monitor-dock" class="nbtn" title="move the monitor to the other side of the view">⇄</button>
     </div>
     <div id="runbar">

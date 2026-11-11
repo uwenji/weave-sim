@@ -8,6 +8,7 @@
 // the residual on a log scale from its first value after the warm-up (empty) to the tolerance (full), one cell per
 // decade still to go. Also here: the Setup sidebar's fold, dock side and width, and the memory of its open section.
 import { drawPlot, fmtNum, watchCanvas } from './plot.js';
+import { makeResizable } from './sidebars.js';
 
 /** left inset of every Monitor plot: equal insets align the plots of a column */
 export const CHART_L = 42;
@@ -53,33 +54,14 @@ export function initMonitor(ctx) {
   setDock(!!store.get('monitorLeft', false)); setOpen(store.get('monitorOpen', true) !== false);
   $('monitor-toggle').onclick = () => setOpen(closed());
   $('monitor-dock').onclick = () => setDock(!app.classList.contains('monitor-left'));
+  // the folded Monitor keeps run / pause, step and reset on its rail: proxies of the run bar's buttons (same code path,
+  // same state), so the two can never disagree
   $('monitor-mini').onclick = () => ctx.toggleRun();
-  /** a sidebar widens by dragging its inner edge (double-click: the default width; arrow keys when focused):
-   *  `rz` the resizer, `el` the sidebar, `cssVar` the width property on #app, `key` its memory, `leftOf()` whether the
-   *  sidebar sits left of the view, `lim` {min, floor, max, reserve}: the width stays within [min, max(floor, min(max,
-   *  window − reserve))] */
-  function makeResizable(rz, el, cssVar, key, leftOf, lim) {
-    const maxW = () => Math.max(lim.floor, Math.min(lim.max, window.innerWidth - lim.reserve));
-    const setWidth = (w, save = true) => {
-      w = Math.round(Math.min(Math.max(w, lim.min), maxW()));
-      app.style.setProperty(cssVar, `${w}px`);
-      if (save) store.set(key, w);
-    };
-    { const w = store.get(key, null); if (w) setWidth(w, false); }
-    let drag = null;
-    rz.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, w: el.getBoundingClientRect().width }; rz.classList.add('drag'); try { rz.setPointerCapture(e.pointerId); } catch (_) { /* synthetic */ } e.preventDefault(); });
-    rz.addEventListener('pointermove', (e) => { if (!drag) return; const dx = e.clientX - drag.x; setWidth(drag.w + (leftOf() ? dx : -dx)); });
-    const endDrag = () => { if (drag) { drag = null; rz.classList.remove('drag'); } };
-    rz.addEventListener('pointerup', endDrag); rz.addEventListener('pointercancel', endDrag);
-    rz.addEventListener('dblclick', () => { app.style.removeProperty(cssVar); store.set(key, null); });
-    rz.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      e.preventDefault();
-      const grow = (e.key === 'ArrowLeft') !== leftOf();
-      setWidth(el.getBoundingClientRect().width + (grow ? 24 : -24));
-    });
-  }
-  makeResizable($('monitor-resize'), $('monitor'), '--monitor-open-w', 'monitorW', () => app.classList.contains('monitor-left'), { min: 260, floor: 300, max: 880, reserve: 460 });
+  $('monitor-mini-step').onclick = () => $('btn-step').click();
+  $('monitor-mini-reset').onclick = () => $('btn-reset').click();
+  const stepTitle = () => { const n = Math.max(1, +$('nb-step').value | 0); $('monitor-mini-step').title = `Step: ${n} iterations`; $('monitor-mini-step').setAttribute('aria-label', `Step ${n} iterations`); };
+  $('nb-step').addEventListener('input', stepTitle); stepTitle();
+  makeResizable({ app, store, rz: $('monitor-resize'), el: $('monitor'), cssVar: '--monitor-open-w', key: 'monitorW', leftOf: () => app.classList.contains('monitor-left'), lim: { min: 240, floor: 300, max: 880, reserve: 460 } });
   // charts follow the width of the Monitor (drag, dock, window)
   let roPending = false;
   new ResizeObserver(() => { if (roPending) return; roPending = true; requestAnimationFrame(() => { roPending = false; redraw(); }); }).observe($('monitor-body'));
@@ -91,7 +73,7 @@ export function initMonitor(ctx) {
   const setSetupDock = (right) => { app.classList.toggle('setup-right', right); store.set('setupRight', right); };
   setSetupDock(!!store.get('setupRight', false));
   $('setup-dock').onclick = () => setSetupDock(!app.classList.contains('setup-right'));
-  makeResizable($('setup-resize'), $('panel'), '--panel-open-w', 'setupW', () => !app.classList.contains('setup-right'), { min: 300, floor: 340, max: 720, reserve: 520 });
+  makeResizable({ app, store, rz: $('setup-resize'), el: $('panel'), cssVar: '--panel-open-w', key: 'setupW', leftOf: () => !app.classList.contains('setup-right'), lim: { min: 260, floor: 340, max: 720, reserve: 520 } });
   const secs = qsa('#sections > details.sec');
   { const saved = store.get('setupSection', null); if (typeof saved === 'string') secs.forEach((d) => { d.open = d.id === saved; }); }
   secs.forEach((d) => d.addEventListener('toggle', () => { if (d.open) store.set('setupSection', d.id); else if (!secs.some(x => x.open)) store.set('setupSection', ''); }));
@@ -299,7 +281,7 @@ export function initMonitor(ctx) {
   // --- the run bar: convergence meter and the run line ---------------------------------------------------------------
   function updateRun() {
     const m = A.model, st = m?.st, sc = A.scene, el = $('run-text'), meter = $('conv-meter');
-    const mini = $('monitor-mini'); mini.classList.toggle('running', !!A.running); mini.setAttribute('aria-label', A.running ? 'Pause' : 'Run');
+    const mini = $('monitor-mini'); mini.classList.toggle('running', !!A.running); mini.setAttribute('aria-label', A.running ? 'Pause' : 'Run'); mini.title = A.running ? 'Pause (Space)' : 'Run (Space)';
     if (!st || !sc) { el.textContent = 'no model'; meter.className = 'meter idle'; return; }
     const sp = sc.solver, tol = +sp.tol, r = st.residual, H = st.history;
     let r0 = NaN;

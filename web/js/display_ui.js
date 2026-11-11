@@ -1,5 +1,5 @@
 // The Display sidebar (the Joint FEA "display tools" idiom, beside the view, folds to a narrow tab, docks left or
-// right): lath colouring (family, pure colour, over / under, pieces, lath group, strand, or a result layer with the
+// right, widens by its inner edge): lath colouring (family, pure colour, over / under, pieces, lath group, strand, or a result layer with the
 // viewer's palettes, smooth along the laths or per segment, bands, delta, range), the member diagrams with their
 // labels and the joint-zone option, and the joints overlay of the discretisation. The View section of the sidebar
 // (theme, layers, deformation, arrows, turntable) is bound in app.js.
@@ -7,6 +7,7 @@ import { DIAGRAMS, DIAGRAM_LABELS, DIAGRAM_AXIS, buildDiagram, diagramUnit } fro
 import { deltaResults, nodeValues, knotNodePairs, fmtG } from './fields.js';
 import { jointPoints, jointCuts, pieceIndex, zoneMask, strandKnotRows } from './discretize.js';
 import { lutGradient, cmapFor, hex, toHex, familyColor, GROUP_COLORS, OVER_COLOR, UNDER_COLOR, PIECE_COLORS, STATE_HEX, CTYPE_HEX } from './colormap.js';
+import { makeResizable } from './sidebars.js';
 
 export const SEG_LAYERS = ['Mx', 'My', 'T', 'N'];
 export const KNOT_LAYERS = ['Fn', 'Ft', 'slip', 'state', 'gap', 'pressure', 'util', 'ctype', 'dent', 'M_rot', 'theta', 'lambda'];
@@ -35,6 +36,7 @@ export function initDisplay(ctx) {
   setDock(!!store.get('displayLeft', false)); setOpen(store.get('displayOpen', window.innerWidth >= 1500) !== false);   // narrow screens start with it folded
   $('display-toggle').onclick = () => setOpen(app.classList.contains('display-closed'));
   $('display-dock').onclick = () => setDock(!app.classList.contains('display-left'));
+  makeResizable({ app, store, rz: $('display-resize'), el: $('display'), cssVar: '--display-open-w', key: 'displayW', leftOf: () => app.classList.contains('display-left'), lim: { min: 210, floor: 252, max: 520, reserve: 520 } });
 
   // --- colouring --------------------------------------------------------------------------------------------------
   /** layer values per segment / node / knot; segment layers smooth → node values (mean of the adjacent segments) */

@@ -80,7 +80,8 @@ export class View {
     this.ground.receiveShadow = true; this.ground.renderOrder = -2; this.scene.add(this.ground);
     this.group = new THREE.Group(); this.scene.add(this.group);
     this.layers = {};
-    this.visible = { mesh: true, wire: false, laths: true, lines: false, knots: true, loads: true, anchors: true, selection: true, probes: true, frames: false, shadow: true, diagram: true, joints: true, path: true, knotmarks: true };
+    this.visible = { mesh: true, wire: false, laths: true, lines: false, knots: true, loads: true, anchors: true, selection: true, probes: true, frames: false, shadow: true, diagram: true, joints: true, path: true, knotmarks: true, bbox: false };
+    this.bbox = null; this.bboxEls = null; this.onBBox = null;      // Display › bounding box: the extents, their labels, an optional listener
     this.raycaster = new THREE.Raycaster();
     this.deform = 1.0; this.needsRender = true;
     this.colouring = { mode: 'family' };
@@ -111,7 +112,7 @@ export class View {
     if (this.layers.path) this.layers.path.traverse(o => { if (o.material) o.material.color.copy(this.colFg); });
     this.labelCache.clear();
     if (this.nav) this.nav.applyTheme();
-    if (this.st) { this.recolour(); this.setOverlays(this.overlays || {}); if (this.diagramSpec) this.setDiagram(this.diagramSpec); if (this.jointSpec) this.setJoints(this.jointSpec); }
+    if (this.st) { this.recolour(); this.setOverlays(this.overlays || {}); if (this.diagramSpec) this.setDiagram(this.diagramSpec); if (this.jointSpec) this.setJoints(this.jointSpec); if (this.visible.bbox) this._buildBBox(); }
     this.needsRender = true;
   }
 
@@ -203,6 +204,7 @@ export class View {
     if (this.layers[name]) this.layers[name].visible = on;
     if (name === 'diagram') this._setLabels(on && this.diagramSpec ? this.diagramSpec.labels : []);
     if (name === 'laths' || name === 'lines') this.recolour();
+    if (name === 'bbox') this._buildBBox();
   }
 
   // --- model --------------------------------------------------------------------------------------------------------
@@ -361,6 +363,7 @@ export class View {
     }
     if (this.overlays) this._placeOverlays();
     if (this.strandSel.size) this._buildPath();
+    if (this.visible.bbox) this._buildBBox();
     this.sun.shadow.needsUpdate = true;
     this.needsRender = true;
   }
@@ -645,9 +648,55 @@ export class View {
   }
 
   // --- screen-space value labels (diagrams) -------------------------------------------------------------------------
+  // --- Display › bounding box ----------------------------------------------------------------------------------------
+  /** the axis-aligned box of the laths as drawn (every corner of the swept sections at the displayed positions, so the
+   *  section size and deformation × are included): its 12 edges as dashed lines (dash length a fixed fraction of the
+   *  model size, so the pattern looks the same on any model), and W (along X), D (along Y), H (along Z) as labels on
+   *  the edges that face the camera (re-chosen every frame in _placeBBoxLabels) */
+  _buildBBox() {
+    if (!this.visible.bbox || !this.lathPos || !this.st || !this.st.m) {
+      this._setLayer('bbox', null); this.bbox = null;
+      if (this.bboxEls) { for (const el of this.bboxEls) el.remove(); this.bboxEls = null; }
+      if (this.onBBox) this.onBBox(null);
+      return;
+    }
+    const p = this.lathPos, lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < p.length; i += 3) for (let c = 0; c < 3; c++) { const v = p[i + c]; if (v < lo[c]) lo[c] = v; if (v > hi[c]) hi[c] = v; }
+    const [x0, y0, z0] = lo, [x1, y1, z1] = hi;
+    const C = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+    const E = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    const pos = new Float32Array(72); E.forEach(([a, b], k) => { pos.set(C[a], 6 * k); pos.set(C[b], 6 * k + 3); });
+    const line = this._fatLines(pos, { rgb: toSRGB(this.colAccent), width: 1.4, opacity: 0.9 });
+    const dash = 0.012 * this.bboxSize;                              // world units, measured along each edge from its start
+    line.material.dashed = true; line.material.dashSize = dash; line.material.gapSize = 0.75 * dash;
+    line.computeLineDistances();
+    this._setLayer('bbox', line);
+    this.bbox = { lo, hi, w: x1 - x0, d: y1 - y0, h: z1 - z0 };
+    if (this.labelsEl) {
+      if (!this.bboxEls) this.bboxEls = [0, 1, 2].map(() => { const el = document.createElement('div'); el.className = 'blabel'; el.innerHTML = '<span></span>'; this.labelsEl.appendChild(el); return el; });
+      const u = this.sceneModel?.units?.length || '', f = (v) => String(+v.toPrecision(4));
+      [['W', this.bbox.w], ['D', this.bbox.d], ['H', this.bbox.h]].forEach(([k, v], i) => { this.bboxEls[i].firstChild.innerHTML = `<b>${k}</b>${f(v)} ${u}`; });
+    }
+    if (this.onBBox) this.onBBox(this.bbox);
+    this.needsRender = true;
+  }
+  _placeBBoxLabels() {
+    const b = this.bbox, els = this.bboxEls; if (!b || !els) return;
+    const cam = this.camera.position, mid = [0, 1, 2].map(c => 0.5 * (b.lo[c] + b.hi[c]));
+    const xs = cam.x >= mid[0] ? b.hi[0] : b.lo[0], ys = cam.y >= mid[1] ? b.hi[1] : b.lo[1], zs = cam.z >= mid[2] ? b.lo[2] : b.hi[2];
+    const at = [[mid[0], ys, zs], [xs, mid[1], zs], [xs, ys, mid[2]]];   // W: an X edge, D: a Y edge (both on the near side), H: the near vertical edge
+    const w = this.canvas.clientWidth, h = this.canvas.clientHeight, v = new THREE.Vector3();
+    at.forEach((q, i) => {
+      v.set(q[0], q[1], q[2]).project(this.camera);
+      const vis = v.z > -1 && v.z < 1 && Math.abs(v.x) <= 1.05 && Math.abs(v.y) <= 1.05;
+      els[i].style.display = vis ? '' : 'none';
+      if (vis) els[i].style.transform = `translate(${((v.x + 1) / 2 * w).toFixed(1)}px, ${((1 - v.y) / 2 * h).toFixed(1)}px)`;
+    });
+  }
+
   _setLabels(list) {
     if (!this.labelsEl) return;
-    this.labelsEl.innerHTML = '';
+    for (const it of this.labelItems) it.el.remove();               // the diagram labels only (the bounding box keeps its own)
     this.labelItems = list.map(({ p, text }) => {
       const el = document.createElement('div'); el.className = 'dlabel';
       el.innerHTML = `<i></i><span>${text}</span>`;
@@ -657,6 +706,7 @@ export class View {
     this.needsRender = true;
   }
   _placeLabels() {
+    this._placeBBoxLabels();
     if (!this.labelItems.length) return;
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight, v = new THREE.Vector3();
     for (const it of this.labelItems) {

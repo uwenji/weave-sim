@@ -23,9 +23,14 @@ certificate warning once (the certificate is made with openssl on the first star
 ## 2 · First five minutes
 
 The window has three sidebars around the 3-D view: **Setup** on the left (the numbered sections, one open at a time),
-**Monitor** and **Display** on the right. Each folds to a narrow tab with its header; `⇄` moves any of the three to
-the other side of the view; drag the inner edge of the Setup or the Monitor to widen it (double-click the edge: the
-default width; two chart columns in the Monitor from ~580 px). The **i** icons explain a control on hover (or tap).
+**Monitor** and **Display** on the right. Each folds to a narrow tab with its header (the folded Monitor keeps three
+round buttons on its tab: run / pause, step, reset); `⇄` moves any of the three to the other side of the view; drag the
+inner edge of any of them to resize it (double-click the edge: the default width; two chart columns in the Monitor from
+~580 px). On a narrow window or an iPad the open sidebars shrink to a minimum width so the view keeps 280 px; when even
+that does not fit, the sidebar opened longest ago folds (opening one there folds another). On a phone (≤ 820 px) the
+view is on top and the sidebars stack below it, each folding to one header line; the view takes at least 58 % of the
+screen and grows into the space the folded sidebars leave (all three folded: the view fills the screen down to their
+header lines); the folded Monitor's header keeps the run / step / reset buttons. The **i** icons explain a control on hover (or tap).
 
 1. **File** — the example list loads `v5 dome (cm)` at the start; any WeaveSim `scene.json` opens with its mesh (select
    both files, or drop them on the view). A mesh alone starts a new scene with the current settings and anchors at the
@@ -51,7 +56,9 @@ default width; two chart columns in the Monitor from ~580 px). The **i** icons e
    contact type, dent, M_rot, θ, λ) or the displacement, *smooth* (node values along each lath) or per segment,
    *bands*, *delta* (after `Zero`) and a fixed range. *Diagram*: the member diagrams (Mx, My, Vy, Vx, T, N, curvature)
    hung on the laths, the deflected shape, contact forces and reactions, with value labels at the extremes or per lath.
-   *View*: theme, layers (laths, centrelines, knots, mesh, wire, shadow, joints, loads, anchors, probes, frames),
+   *View*: theme, layers (laths, centrelines, knots, mesh, wire, shadow, joints, loads, anchors, probes, frames,
+   *bounding box*: the axis-aligned box of the laths as drawn — sections and deformation × included — in dashed lines,
+   with W (X), D (Y) and H (Z) labelled on the edges facing you),
    deformation ×, arrow size, turntable. **Hover** a lath: a small window shows the lath, the position along it and the
    local value of the colour layer and the diagram (at a crossing also its forces).
 6. **Load test** (Monitor run bar) — relax (`Run`), then `Zero`: the relaxed geometry becomes the reference

@@ -28,6 +28,7 @@ import { initKnots } from './knot_ui.js';
 import { initMonitor } from './monitor_ui.js';
 import { initInfo } from './info.js';
 import { stability } from './stability.js';
+import { initSidebarFit } from './sidebars.js';
 
 const $ = (id) => document.getElementById(id);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -602,6 +603,7 @@ function updateResetTitle() {
   const b = $('btn-reset'); if (!b) return;
   const it = A.model ? A.model.st.iteration : 0;
   b.title = it ? `Reset: back to the woven geometry — discards ${it} iterations, their history, the followed values and the Zero reference` : 'Reset: back to the woven geometry';
+  const mr = $('monitor-mini-reset'); if (mr) mr.title = b.title;     // the folded Monitor's reset says the same
 }
 function onSceneEdited() { updateSectionReadout(); updateContactReadout(); updateSummaries(); drawChart(); calib?.onSceneEdit?.(); }
 
@@ -883,6 +885,7 @@ async function init() {
   const q = new URLSearchParams(location.search);
   const first = q.get('scene') || store.get('example', EXAMPLES[0].path);
   sel.value = first; await loadExample(first);
+  initSidebarFit({ app: $('app'), viewport: $('viewport') });       // narrow windows: fold a sidebar rather than squeeze the view
   requestAnimationFrame(frame);
 }
 
