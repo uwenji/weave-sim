@@ -4,7 +4,7 @@
 
 ```bash
 conda activate weavesim                 # any Python 3 works; nothing to install
-cd ".../330_Modelling/WeaveSim"
+cd ".../WeaveSim"
 python web/serve.py
 ```
 
