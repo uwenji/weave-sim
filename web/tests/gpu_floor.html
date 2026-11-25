@@ -1,0 +1,72 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Ground: GPU vs CPU</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+// The ground (6 Anchors › ground) on WebGPU against the CPU f64 solver: a single lath without anchors (rest, stick,
+// slide, μ = 0) and an example dome standing free on the ground. ?dome=0 skips the dome, ?scene=name picks another one.
+import { Scene } from '../js/scene.js';
+import { topologyFromPolylines } from '../js/topology.js';
+import { CpuSolver, Floor } from '../js/solver_cpu.js';
+import { GpuSolver, getDevice } from '../js/solver_gpu.js';
+import { nodeFrames } from '../js/model.js';
+import { caseByName } from './browser_cases.js';
+const q = new URLSearchParams(location.search);
+const out = document.getElementById('out'), lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); console.log(s); };
+const f4 = (v) => v.toFixed(4);
+
+function lath({ push = 0, mu = 0.4 } = {}) {
+  const L = 100, nseg = 10, P = [];
+  for (let i = 0; i <= nseg; i++) P.push(L * i / nseg - L / 2, 0, 2 + 0.05 * (L * i / nseg));
+  const topo = topologyFromPolylines([P], null, 3.0);
+  const sc = new Scene(); sc.units = new sc.units.constructor('cm', 'N');
+  sc.section.width = 6; sc.section.height = 3; sc.material.E = 1e6; sc.material.G = 6e4;
+  sc.contact.strength = 3000; sc.contact.stick_strength = 1000; sc.contact.ramp_iter = 0;
+  sc.loads.gravity.enabled = true; sc.solver.tol = 1e-6;
+  if (push) sc.loads.udl = { enabled: true, q: [push / L, 0, 0], per: 'length' };
+  sc.floor = { enabled: true, z: 0, mu };
+  return { sc, topo, contacts: false };
+}
+async function dome(name) {
+  const { sc, topo, contacts } = await caseByName(name);
+  sc.anchors = []; sc.loads.point = [];
+  const pre = new CpuSolver(sc, topo, { contacts }), st = pre.st, R = nodeFrames(st); let lo = Infinity;
+  for (let i = 0; i < st.n; i++) { const g = sc.group(sc.strandGroup(st.nodeStrand[i])).section; lo = Math.min(lo, st.X[3 * i + 2] - Floor.clearance(g.width, g.height, R[9 * i + 2], R[9 * i + 5])); }
+  sc.floor = { enabled: true, z: lo, mu: 0.4 };
+  return { sc, topo, contacts };
+}
+function measure(sv) {
+  const st = sv.st, f = sv.floor, s = f.summary(), W = [0, 0, 0]; let lo = Infinity, hi = 0;
+  for (let i = 0; i < st.n; i++) { for (let k = 0; k < 3; k++) W[k] += sv.loads.const[3 * i + k]; if (f.state[i]) { const r = Math.hypot(f.F[3 * i], f.F[3 * i + 1]) / Math.max(f.F[3 * i + 2], 1e-30); lo = Math.min(lo, r); hi = Math.max(hi, r); } }
+  return { it: st.iteration, res: st.residual, s, W, lo, hi, x0: st.X[0] };
+}
+const show = (m) => `it ${String(m.it).padStart(6)} res ${(+m.res).toExponential(2)} · ${m.s.nodes} on the ground, ${m.s.slipping} sliding · ΣF (${m.s.sum.map(f4).join(', ')}) · |F_t|/F_n ≤ ${f4(m.hi)}`;
+(async () => {
+  const dev = await getDevice();
+  if (!dev) { log('NO WEBGPU'); window.__done = true; return; }
+  let fails = 0;
+  const run = async (name, make, n, ok) => {
+    const a = await make(), b = await make();
+    const cpu = new CpuSolver(a.sc, a.topo, { contacts: a.contacts });
+    for (let d = 0; d < n && !cpu.converged; d += 250) cpu.step(Math.min(250, n - d));
+    const model = new CpuSolver(b.sc, b.topo, { contacts: b.contacts });
+    const gpu = new GpuSolver(dev, [model], { perSubmit: 50 });
+    const msgs = await gpu.compileInfo(); if (msgs.some(m => m.startsWith('error'))) { log(name + ' COMPILE ' + msgs.join('\n')); fails++; return; }
+    for (let d = 0; d < n; d += 500) { const c = await gpu.step(Math.min(500, n - d), { force: false }); if (c[0].done) break; }
+    await gpu.download(0); gpu.dispose();
+    const mc = measure(cpu), mg = measure(model), good = ok(mc, mg);
+    if (!good) fails++;
+    log(`${good ? 'ok  ' : 'FAIL'} ${name}  loads Σ (${mc.W.map(f4).join(', ')})\n       cpu ${show(mc)}\n       gpu ${show(mg)}`);
+  };
+  const near = (a, b, tol) => Math.abs(a - b) <= tol;
+  await run('lath rest ', () => lath(), 20000, (c, g) => near(c.s.sum[2], -c.W[2], 1e-4 * -c.W[2]) && near(g.s.sum[2], -g.W[2], 1e-3 * -g.W[2]) && g.s.nodes === c.s.nodes);
+  await run('lath stick', () => lath({ push: 3 }), 20000, (c, g) => near(g.s.sum[0], -g.W[0], 1e-3 * g.W[0]) && g.s.slipping === 0 && near(c.s.sum[0], -c.W[0], 1e-4 * c.W[0]));
+  await run('lath slide', () => lath({ push: 6 }), 3000, (c, g) => near(g.hi, 0.4, 1e-5) && near(g.lo, 0.4, 1e-5) && g.x0 + 50 > 1 && near(c.hi, 0.4, 1e-9));
+  await run('lath mu = 0', () => lath({ push: 3, mu: 0 }), 2000, (c, g) => Math.abs(g.s.sum[0]) < 1e-6 && g.x0 + 50 > 1 && Math.abs(c.s.sum[0]) < 1e-12);
+  if (q.get('dome') !== '0') {
+    const name = q.get('scene') || 'v5dome_cm';
+    await run(`${name} free on the ground`, () => dome(name), +(q.get('iters') || 12000), (c, g) => near(c.s.sum[2], -c.W[2], 5e-3 * -c.W[2]) && near(g.s.sum[2], -g.W[2], 5e-3 * -g.W[2]));
+  }
+  log(fails ? `${fails} check(s) failed` : 'all ground checks passed');
+  window.__done = true;
+})();
+</script></body></html>

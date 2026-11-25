@@ -11,6 +11,7 @@ export const pieceKey = (s, p) => `${s | 0}:${p | 0}`;
 const parsePieceKey = (k) => { const m = /^(\d+):(\d+)$/.exec(String(k)); return m ? [+m[1], +m[2]] : null; };
 
 export const SCENE_VERSION = 1;
+export const FLOOR_MU = 0.4;                     // default friction coefficient of the ground
 export const DOF_NAMES = ['X', 'Y', 'Z', 'rX', 'rY', 'rZ'];
 
 const selectorFrom = (d) => { d = d || {}; const s = { type: d.type || 'frame' }; for (const k of ['id', 'strand', 'ids', 'radius']) if (d[k] != null) s[k] = structuredClone(d[k]); return s; };
@@ -38,6 +39,9 @@ export class Scene {
     this.hybrid = { enabled: false, groups: [], assign: {}, pieces: {} };   // pieces: "strand:piece" → group (2…) overriding the strand's group for that piece of a discretisation
     this.loads = { gravity: { enabled: true, direction: [0, 0, -1] }, udl: { enabled: false, q: [0, 0, 0], per: 'length' }, point: [] };
     this.anchors = [];
+    // the ground: a horizontal plane at height z that the laths cannot pass (penalty contact with the contact strength,
+    // Coulomb stick / slip with its own friction coefficient mu); z null = not placed yet (placed at the lowest point)
+    this.floor = { enabled: false, z: null, mu: FLOOR_MU };
     this.utm = { path: null, mode: 'overlay', probe: null, columns: { force: null, displacement: null }, units: { force: 'N', length: 'mm' }, pad_stiffness: 0.0 };
     this.name = 'scene';
     this.extra = {};                            // unknown top-level keys, written back unchanged
@@ -109,6 +113,7 @@ export class Scene {
     if (this.discretize) { if (this.discretize.max_length != null) this.discretize.max_length *= L; if (this.discretize.joint_length != null) this.discretize.joint_length *= L; }
     for (const k of Object.keys(this.joints)) this.joints[k] = this.joints[k].map(v => v * L);
     for (const p of this.loads.point) p.F = p.F.map(f => f * F);
+    if (this.floor.z != null) this.floor.z *= L;
     this.loads.udl.q = this.loads.udl.per === 'length' ? this.loads.udl.q.map(q => q * F / L) : this.loads.udl.q.map(q => q * F / (L * L));
     this.units = nu;
   }
@@ -127,6 +132,7 @@ export class Scene {
         ...(Object.keys(this.hybrid.pieces).length ? { pieces: Object.fromEntries(Object.entries(this.hybrid.pieces).map(([k, v]) => [String(k), v | 0])) } : {}) },
       loads: this.loads,
       anchors: this.anchors.map(a => ({ select: a.select, fix: a.fix.map(f => (f ? 1 : 0)), name: a.name || '' })),
+      ...(this.floor.enabled || this.floor.z != null ? { floor: { enabled: !!this.floor.enabled, z: this.floor.z, mu: +this.floor.mu } } : {}),   // only once a ground was set (the Python program ignores the key)
       utm: this.utm,
       ...this.extra,
     };
@@ -170,13 +176,15 @@ export class Scene {
       point: (L.point || []).map(p => ({ frame: [p.frame[0] | 0, p.frame[1] | 0], F: p.F.map(Number), space: p.space || 'world', name: p.name || '' })),
     };
     sc.anchors = (d.anchors || []).map(a => ({ select: selectorFrom(a.select), fix: (a.fix || [1, 1, 1, 0, 0, 0]).map(f => (f ? 1 : 0)), name: a.name || '' }));
+    const fl = d.floor || {}, fz = fl.z == null ? null : +fl.z, fmu = fl.mu == null ? FLOOR_MU : +fl.mu;
+    sc.floor = { enabled: !!fl.enabled && Number.isFinite(fz), z: Number.isFinite(fz) ? fz : null, mu: Number.isFinite(fmu) && fmu >= 0 ? fmu : FLOOR_MU };
     const u = d.utm || {};
     sc.utm = {
       path: u.path ?? null, mode: u.mode || 'overlay', probe: u.probe ? structuredClone(u.probe) : null,
       columns: { force: null, displacement: null, ...(u.columns || {}) }, units: { force: 'N', length: 'mm', ...(u.units || {}) },
       pad_stiffness: +(u.pad_stiffness ?? 0),
     };
-    const known = new Set(['version', 'units', 'mesh', 'weave', 'material', 'section', 'contact', 'beam', 'solver', 'discretize', 'joints', 'hybrid', 'loads', 'anchors', 'utm']);
+    const known = new Set(['version', 'units', 'mesh', 'weave', 'material', 'section', 'contact', 'beam', 'solver', 'discretize', 'joints', 'hybrid', 'loads', 'anchors', 'floor', 'utm']);
     for (const k of Object.keys(d)) if (!known.has(k)) sc.extra[k] = structuredClone(d[k]);
     return sc;
   }

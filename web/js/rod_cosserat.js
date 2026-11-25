@@ -17,6 +17,14 @@
 // parallel to Ψ, and Ψ × m is the roll moment of anisotropic bending; the twist–bending coupling comes from the same term
 // and from the frames being free. Lateral–torsional buckling, shear deflection (12EI/κGAL²) and the Kirchhoff limit (GA → ∞) all follow.
 // Torques T are world vectors per segment; the solver integrates a 3-axis body angular velocity per segment.
+//
+// Frame inertia. The rotational stiffness a segment frame feels at a joint is the diagonal of J⁻ᵀ B J⁻¹ / l̄, not B / l̄:
+// with J⁻¹ ≈ 1 ∓ ½ [Ψ]×, turning a frame about one material axis at a joint that is already bent by Ψ also changes the
+// other two components of Ψ, so it works against their stiffnesses too:
+//   k_α = (B_α + ¼ Σ_{β≠α} B_β (Ψ × e_α)_β²) / l̄      e.g. roll (α = Z):  (GJ + ¼ EIy Ψ_x² + ¼ EIx Ψ_y²) / l̄
+// For a lath (EIy ≫ GJ) the second part overtakes GJ once the flatwise bend of the joint passes √(4 GJ / EIy) ≈ 0.3 rad.
+// apply() leaves that part in kDyn for the bend of this evaluation; the solver adds it to the frame inertia (without it
+// a sharply bent lath has a roll mode stiffer than twice its inertia and dynamic relaxation flips it for ever).
 import { toFrame } from './quat.js';
 
 export const SHEAR_KAPPA = 5 / 6;                     // shear coefficient of a rectangle
@@ -60,6 +68,22 @@ export class CosseratRod {
     this.energy = 0; this.energyParts = { bending: 0, torsion: 0, stretch: 0, shear: 0 };
     this.cNode = []; this.cSeg = []; this.cLen = []; this.cB = []; this.cQ = new Float64Array(0); this.cM = new Float64Array(0);
     this._R = new Float64Array(9 * m);
+    this.kDyn = new Float64Array(3 * m);              // bending-coupling share of the frame stiffness (header), per segment and axis
+  }
+
+  /** kDyn of the frames as they are (apply() does the same on the way; the WebGPU download uses this) */
+  updateBendCoupling(st) {
+    const kd = this.kDyn, psi = new Float64Array(3);
+    kd.fill(0);
+    for (let j = 0; j < st.p; j++) {
+      const sa = st.jSeg0[j], sb = st.jSeg1[j];
+      relRotation(st.Q, sa, sb, psi);
+      const q0 = psi[0] * psi[0], q1 = psi[1] * psi[1], q2 = psi[2] * psi[2], f = 0.25 / st.jLen[j];
+      const k0 = f * (this.EIy[j] * q2 + this.GJ[j] * q1), k1 = f * (this.EIx[j] * q2 + this.GJ[j] * q0), k2 = f * (this.EIx[j] * q1 + this.EIy[j] * q0);
+      kd[3 * sa] += k0; kd[3 * sa + 1] += k1; kd[3 * sa + 2] += k2;
+      kd[3 * sb] += k0; kd[3 * sb + 1] += k1; kd[3 * sb + 2] += k2;
+    }
+    return kd;
   }
 
   /** clamps (rX rY rZ anchors, Anchors.rotClamps): a boundary joint between the segment's frame and its frame at this
@@ -107,12 +131,19 @@ export class CosseratRod {
       this.N[j] = n3; this.V[2 * j] = n1; this.V[2 * j + 1] = n2;
       eStretch += 0.5 * l0 * n3 * s3; eShear += 0.5 * l0 * (n1 * s1 + n2 * s2);
     }
-    const psi = new Float64Array(3);
+    const psi = new Float64Array(3), kd = this.kDyn;
+    kd.fill(0);
     for (let j = 0; j < p; j++) {
       const sa = st.jSeg0[j], sb = st.jSeg1[j], lb = st.jLen[j], o = 9 * sa;
       const th = relRotation(Q, sa, sb, psi);
       const d0 = psi[0] / lb - st.Omega0[3 * j], d1 = psi[1] / lb - st.Omega0[3 * j + 1], d2 = psi[2] / lb - st.Omega0[3 * j + 2];
       const m0 = this.EIx[j] * d0, m1 = this.EIy[j] * d1, m2 = this.GJ[j] * d2;
+      {                                                 // frame-inertia share of the bent joint (header: ¼ B_β (Ψ × e_α)_β² / l̄)
+        const q0 = psi[0] * psi[0], q1 = psi[1] * psi[1], q2 = psi[2] * psi[2], f = 0.25 / lb;
+        const k0 = f * (this.EIy[j] * q2 + this.GJ[j] * q1), k1 = f * (this.EIx[j] * q2 + this.GJ[j] * q0), k2 = f * (this.EIx[j] * q1 + this.EIy[j] * q0);
+        kd[3 * sa] += k0; kd[3 * sa + 1] += k1; kd[3 * sa + 2] += k2;
+        kd[3 * sb] += k0; kd[3 * sb + 1] += k1; kd[3 * sb + 2] += k2;
+      }
       // J_l⁻ᵀ(Ψ) m = m + ½ Ψ×m + β Ψ×(Ψ×m),  β = 1/θ² − (1 + cos θ)/(2θ sin θ)  (→ 1/12 + θ²/720)
       const beta = th < 1e-3 ? 1 / 12 + th * th / 720 : 1 / (th * th) - (1 + Math.cos(th)) / (2 * th * Math.sin(th));
       const c0 = psi[1] * m2 - psi[2] * m1, c1 = psi[2] * m0 - psi[0] * m2, c2 = psi[0] * m1 - psi[1] * m0;
@@ -160,7 +191,8 @@ export class CosseratRod {
   }
 
   /** rotational stiffness per segment and material axis (3m): joints B/l̄, clamps B/l_c, the shear lever κGA·L²/l0 about
-   *  X and Y (fictitious inertias of the dynamic relaxation; built with the goals, before any force evaluation) */
+   *  X and Y (fictitious inertias of the dynamic relaxation; built with the goals, before any force evaluation). The
+   *  part that depends on how far the joints are bent is kDyn (header), added by the solver at every iteration. */
   addRotStiffness(st, kRot) {
     const X = st.X;
     for (let j = 0; j < st.p; j++) {

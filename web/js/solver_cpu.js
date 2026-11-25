@@ -2,6 +2,8 @@
 // The rod is the discrete Cosserat (Simo–Reissner) rod of rod_cosserat.js; the contact goals follow weavesim/goals
 // (contact.py, loads.py) plus the augmented-Lagrangian gap described in the WeaveSim README (contact.augmented / al_every).
 //
+// The ground (scene.floor) is the Floor goal below: a plane the nodes rest on, with stick / slip friction.
+//
 // One iteration:  F, T = Σ goal forces (nodes) and world torques (segment frames); anchors zero fixed DOFs (rotation
 // anchors act through the clamp joints of CosseratRod.setClamps); v += F/m, ω += Rᵀ T / I (Δt = 1, body axes, masses and
 // inertias = mass_scale·Σk); x += v, q ← q ⊗ exp(ω); Barnes kinetic damping rolls back to the kinetic-energy peak and
@@ -17,11 +19,24 @@ export const SUPPORT_SMOOTH = 0.03;                    // tanh width (≈1.7°) 
 // overshoots the window accelerates under the saturated torque and chatters ±3–5° for ever (the roll never settles, the
 // section gap D never closes). Bounding the roll step to half the window keeps the frame inside the linear core.
 export const TWIST_RATE_MAX = 0.5 * SUPPORT_SMOOTH;
+// Roll damping of the segments that carry a crossing: their roll rate is halved every iteration. The support point's
+// torque is the one bang-bang force of the model, and kinetic damping cannot tame it: it watches one kinetic energy for
+// the whole model, so a lath rocking between its two edges keeps tripping the reset for everybody (the slow modes then
+// never build momentum) while its own rocking survives. With the roll inertia set from the window stiffness
+// (ω² = 1 / (mass_scale · torsion_factor) ≈ ⅓ per iteration²) a factor ½ is about critical damping of that oscillator.
+// It acts on a pseudo-velocity only: the equilibria are untouched.
+export const ROLL_DAMP = 0.5;
 // Augmented Lagrangian safeguards (updateMultipliers): a crossing whose contact point sits on a fixed node (free weight
 // of the segment nodes below AL_FREE_MIN) carries no multiplier — its gap belongs to the support, an exact-gap demand
 // there cannot be met and the Uzawa step would ratchet λ for ever; and λ never exceeds the crushing capacity of the
 // face overlap, fc90·wA·wB/sinθ (beyond it the timber yields: the remaining penetration is embedment, not force).
 export const AL_FREE_MIN = 0.25;
+// The ground and the rigid-body freedoms of a model that no anchor holds (Floor): the fictitious mass of a rigid freedom
+// is RB_MASS × mass_scale × the ground stiffness on it (the factor covers the coupling between translation and
+// rotation); it moves at most RB_VMAX × the lath thickness per iteration.
+export const RB_MASS = 2.0;
+export const RB_VMAX = 0.05;
+export const RB_LEVER = 0.05;                          // least lever of the ground springs about c, as a share of the model radius (rotational mass floor)
 
 // numpy-style pairwise summation (the order np.sum uses), for the energy sums that steer kinetic damping
 export function pairwiseSum(a, lo = 0, n = a.length) {
@@ -491,6 +506,133 @@ export class PolylineContact {
   }
 }
 
+// ================================================================================================= Floor
+/** The ground: a horizontal plane at height z (scene.floor) that no lath can pass. Every node whose section reaches
+ *  below the plane is pushed up by a penalty spring and held sideways by Coulomb friction with a stick spring — the
+ *  scheme of the crossing contact (penalty k_n = contact.strength, stick spring k_t = contact.stick_strength, the same
+ *  ramp), with the ground's own friction coefficient mu and Coulomb's law by return mapping:
+ *    clearance   c = ½ w |X·e_z| + ½ h |Y·e_z|       the half-extent of the section below its centreline (node frame X, Y)
+ *    penetration pen = z + c − x_z;   in contact (pen > 0):   F_n = k_n pen   (upwards)
+ *    stick point a on the plane (one per node):   S = (x − a)_xy;   k_t |S| > mu F_n  →  a ← a + (1 − mu F_n / k_t |S|) S
+ *    F_t = −k_t (x − a)_xy   with the moved stick point (|F_t| ≤ mu F_n always);   clear of the ground the stick
+ *    point follows the node.
+ *  The force acts at the node (no lever torque on the frames). The WebGPU solver runs the same lines in k_floor.
+ *
+ *  Rigid-body freedoms. A model that only the ground holds (no anchor) can fall, slide and tip as a whole. Dynamic
+ *  relaxation is hopeless at that on its own: the fictitious node masses are sized for the axial stiffness of the
+ *  laths, so the whole model answers to its weight thousands of times too slowly (and the nodal residual does not see
+ *  a force spread over every node). The solver therefore carries six extra freedoms — a translation v and a rotation
+ *  w of the whole model about the centroid c of its nodes — driven by the resultant of the external forces (loads + ground),
+ *    Q_t = Σ (L_i + G_i),   Q_r = Σ (x_i − c) × (L_i + G_i)      (the internal forces cancel in both),
+ *  with fictitious masses from the ground springs in contact (n_c nodes, offsets d = x − c):
+ *    M_t = RB_MASS·ms·n_c (k_t, k_t, k_n),   I_r = RB_MASS·ms·(k_n Σd_y² + k_t Σd_z², k_n Σd_x² + k_t Σd_z², k_t Σ(d_x² + d_y²)),
+ *  with n_c ≥ 1 and a least lever RB_LEVER·R, so a model in the air has the masses of one node on the ground: it falls
+ *  with the acceleration weight / (RB_MASS·ms·k_n) — a few dozen iterations per lath thickness — at no more than
+ *  RB_VMAX·h per iteration (w: the same at the farthest node). They are integrated like every other freedom (velocity,
+ *  then position; their kinetic energy counts and kinetic damping resets them), every node moves by v + w × (x − c),
+ *  every frame turns by w, and the residual includes |Q_t| / F_ref and |Q_r| / (F_ref·R): the solve has not converged
+ *  while the ground reactions do not balance the loads. */
+export class Floor {
+  constructor(scene, st) {
+    const n = st.n;
+    this.n = n;
+    this.w = new Float64Array(n); this.h = new Float64Array(n);     // section of every node (its lath group)
+    this.ax = new Float64Array(n); this.ay = new Float64Array(n);   // stick points
+    for (let i = 0; i < n; i++) { this.ax[i] = st.X[3 * i]; this.ay[i] = st.X[3 * i + 1]; }
+    this.F = new Float64Array(3 * n);                               // the ground's force on every node (world axes)
+    this.state = new Uint8Array(n);                                 // 0 clear of the ground, 1 stick, 2 slip
+    this.energy = 0; this.FnMax = 0; this.ramp = 1.0;
+    this.fresh = true;                                              // stick points not on the GPU yet (GpuSolver.updateParams)
+    // rigid-body freedoms: the reference point c (the centroid of the nodes, followed at every evaluation), the model
+    // radius about it, the velocities, and the sums of the last force evaluation
+    const c = [0, 0, 0]; for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) c[k] += st.X[3 * i + k] / Math.max(n, 1);
+    let R2 = 0; for (let i = 0; i < n; i++) R2 = Math.max(R2, (st.X[3 * i] - c[0]) ** 2 + (st.X[3 * i + 1] - c[1]) ** 2 + (st.X[3 * i + 2] - c[2]) ** 2);
+    this.c = Float64Array.from(c); this.Rb = Math.max(Math.sqrt(R2), 1e-9);
+    this.rv = new Float64Array(3); this.rw = new Float64Array(3);
+    this.Qt = new Float64Array(3); this.Qr = new Float64Array(3); this.d2 = new Float64Array(3); this.nc = 0;
+    this.bind(scene, st);
+  }
+  /** (re)read the parameters and the node sections; the stick points stay */
+  bind(scene, st) {
+    this.p = scene.floor; this.cp = scene.contact;
+    const g = scene.nodeGroups(st);
+    let hmin = Infinity;
+    for (let i = 0; i < st.n; i++) { const sec = scene.group(g[i]).section; this.w[i] = +sec.width; this.h[i] = +sec.height; hmin = Math.min(hmin, this.h[i], this.w[i]); }
+    this.vmax = RB_VMAX * (Number.isFinite(hmin) && hmin > 0 ? hmin : 1.0);   // rigid speed limits per iteration
+    this.wmax = this.vmax / this.Rb;
+  }
+  /** fictitious masses of the three rigid translations and the three rigid rotations, from the sums of apply() */
+  rigidMasses(ms, out = new Float64Array(6)) {
+    const kn = this.ramp * this.cp.strength, kt = this.ramp * this.cp.stick_strength, d = this.d2, f = ms * RB_MASS;
+    const nc = Math.max(this.nc, 1), rmin = (RB_LEVER * this.Rb) ** 2 * kn;
+    out[0] = Math.max(f * nc * kt, 1e-30); out[1] = out[0]; out[2] = Math.max(f * nc * kn, 1e-30);
+    out[3] = Math.max(f * Math.max(kn * d[1] + kt * d[2], rmin), 1e-30); out[4] = Math.max(f * Math.max(kn * d[0] + kt * d[2], rmin), 1e-30);
+    out[5] = Math.max(f * Math.max(kt * (d[0] + d[1]), rmin), 1e-30);
+    return out;
+  }
+  /** the rigid part of the residual: the unbalanced resultant against the reference force */
+  rigidResidual(fref) { return Math.max(Math.hypot(this.Qt[0], this.Qt[1], this.Qt[2]) / fref, Math.hypot(this.Qr[0], this.Qr[1], this.Qr[2]) / (fref * this.Rb)); }
+  /** the penalty ramp of the contacts at an iteration (CpuSolver.step) */
+  static rampAt(iteration, rampN) { return rampN <= 0 ? 1.0 : Math.min(1.0, 0.01 + 0.99 * iteration / rampN); }
+  addStiffness(kNode) { const k = this.cp.strength + this.cp.stick_strength; for (let i = 0; i < kNode.length; i++) kNode[i] += k; }
+  /** half-extent of a w × h section below its centreline: Xz, Yz the vertical components of the frame's width and thickness axes */
+  static clearance(w, h, Xz, Yz) { return 0.5 * w * Math.abs(Xz) + 0.5 * h * Math.abs(Yz); }
+
+  /** adds the ground's forces to F; `loads` (3 per node, world) are the external loads of this evaluation: with them
+   *  the resultant Q_t, Q_r of loads + ground and the stiffness sums of the rigid-body freedoms are formed */
+  apply(st, F, ramp = this.ramp, loads = null) {
+    const n = st.n, X = st.X, p = this.p, cp = this.cp, out = this.F, c = this.c;
+    let q0 = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0, dxx = 0, dyy = 0, dzz = 0, nc = 0;
+    const z0 = +p.z, mu = Math.max(+p.mu || 0, 0);
+    const kn = ramp * cp.strength, kt = ramp * cp.stick_strength;
+    // the reference point of the rigid rotation is the centroid of the nodes as they are now: an unbalanced resultant
+    // (a model sliding or falling) then has no moment arm of its own and does not turn the model
+    if (n) { let cx = 0, cy = 0, cz = 0; for (let i = 0; i < n; i++) { cx += X[3 * i]; cy += X[3 * i + 1]; cz += X[3 * i + 2]; } c[0] = cx / n; c[1] = cy / n; c[2] = cz / n; }
+    const Qn = this._Qn = nodeQuats(st, this._Qn && this._Qn.length === 4 * n ? this._Qn : undefined);
+    const R = this._R || (this._R = new Float64Array(9));
+    let e = 0, fmax = 0;
+    this.ramp = ramp;
+    for (let i = 0; i < n; i++) {
+      toFrame(Qn, 4 * i, R);
+      const pen = (z0 - X[3 * i + 2]) + Floor.clearance(this.w[i], this.h[i], R[2], R[5]);
+      if (pen > 0) {
+        const Fn = kn * pen;
+        const sx = X[3 * i] - this.ax[i], sy = X[3 * i + 1] - this.ay[i];
+        const Ftv = kt * Math.sqrt(sx * sx + sy * sy), limit = mu * Fn;
+        // Coulomb by return mapping: beyond μ F_n the stick point is dragged after the node until the force is back on
+        // the cone — the friction force never exceeds μ F_n (no slip relaxation: the plane does not move)
+        const scale = Ftv > limit ? 1.0 - limit / Math.max(Ftv, 1e-12) : 0.0;
+        const dax = sx * scale, day = sy * scale;
+        if (scale > 0) { this.ax[i] += dax; this.ay[i] += day; }
+        const ex = sx - dax, ey = sy - day;
+        out[3 * i] = -kt * ex; out[3 * i + 1] = -kt * ey; out[3 * i + 2] = Fn;
+        this.state[i] = scale > 0 ? 2 : 1;
+        e += 0.5 * kn * pen * pen + 0.5 * kt * (ex * ex + ey * ey);
+        if (Fn > fmax) fmax = Fn;
+        const dx = X[3 * i] - c[0], dy = X[3 * i + 1] - c[1], dz = X[3 * i + 2] - c[2];
+        dxx += dx * dx; dyy += dy * dy; dzz += dz * dz; nc++;
+      } else {
+        this.ax[i] = X[3 * i]; this.ay[i] = X[3 * i + 1];
+        out[3 * i] = 0; out[3 * i + 1] = 0; out[3 * i + 2] = 0; this.state[i] = 0;
+      }
+      F[3 * i] += out[3 * i]; F[3 * i + 1] += out[3 * i + 1]; F[3 * i + 2] += out[3 * i + 2];
+      if (loads) {
+        const gx = loads[3 * i] + out[3 * i], gy = loads[3 * i + 1] + out[3 * i + 1], gz = loads[3 * i + 2] + out[3 * i + 2];
+        const dx = X[3 * i] - c[0], dy = X[3 * i + 1] - c[1], dz = X[3 * i + 2] - c[2];
+        q0 += gx; q1 += gy; q2 += gz; q3 += dy * gz - dz * gy; q4 += dz * gx - dx * gz; q5 += dx * gy - dy * gx;
+      }
+    }
+    this.energy = e; this.FnMax = fmax;
+    if (loads) { this.Qt[0] = q0; this.Qt[1] = q1; this.Qt[2] = q2; this.Qr[0] = q3; this.Qr[1] = q4; this.Qr[2] = q5; this.d2[0] = dxx; this.d2[1] = dyy; this.d2[2] = dzz; this.nc = nc; }
+  }
+  /** nodes on the ground, how many slide, and the resultant of the ground's forces */
+  summary() {
+    let nodes = 0, slipping = 0; const sum = [0, 0, 0];
+    for (let i = 0; i < this.n; i++) if (this.state[i]) { nodes++; if (this.state[i] === 2) slipping++; for (let k = 0; k < 3; k++) sum[k] += this.F[3 * i + k]; }
+    return { nodes, slipping, sum, FnMax: this.FnMax };
+  }
+}
+
 // ================================================================================================= Solver
 /** structural deep copy (copy.deepcopy): class instances keep their prototype, typed arrays / arrays / maps / sets are
  *  copied, shared references stay shared (memo); objects in `memo` beforehand are kept as they are (the topology) */
@@ -544,10 +686,16 @@ export class CpuSolver {
       if (this.contact) this.contact.dentAfterDefault = (sc.solver.warmup_iter | 0) + (sc.contact.ramp_iter | 0);
     }
     if (this.contact) { this.contact.p = sc.contact; this.contact.setFixed(this.anchors.nodeFree); this.contact.penAcc.fill(0); this.contact.penN = 0; }
+    // the ground (scene.floor): its stick points are state and survive a rebuild; a new one starts at the nodes
+    const fl = sc.floor;
+    if (fl && fl.enabled && fl.z != null && Number.isFinite(+fl.z)) {
+      if (rest !== null && this.floor && this.floor.n === st.n) this.floor.bind(sc, st); else this.floor = new Floor(sc, st);
+    } else this.floor = null;
     const n = st.n, m = st.m;
     const kNode = new Float64Array(n), kSeg = new Float64Array(m);
     this.beam.addStiffness(st, kNode, kSeg);
     if (this.contact) this.contact.addStiffness(st, kNode, kSeg);
+    if (this.floor) this.floor.addStiffness(kNode);
     const ms = +sc.solver.mass_scale;
     this.mass = new Float64Array(n); for (let i = 0; i < n; i++) this.mass[i] = ms * Math.max(kNode[i], 1e-12);
     // rotational inertia per segment and body axis (X, Y, Z): joints, clamps, shear lever + the contact righting share
@@ -593,6 +741,10 @@ export class CpuSolver {
     const Xprev = new Float64Array(3 * n), Qprev = new Float64Array(4 * m), dq = new Float64Array(4), qq = new Float64Array(4), q0 = new Float64Array(4);
     const kin = new Float64Array(3 * n), kinR = new Float64Array(3 * m);
     const W = st.Wr, I3 = this.inertia3, An = this.anchors;
+    // the rigid-body freedoms of a model that only the ground holds (Floor): off as soon as an anchor exists
+    const fl = this.floor, rb = fl && An.fixedNodes.length === 0 && An.rotClamps.length === 0 ? fl : null;
+    const Mrb = new Float64Array(6), qw = new Float64Array(4);
+    if (fl && !rb) { fl.rv.fill(0); fl.rw.fill(0); }
     let broke = false;
     for (let it = 0; it < nIter; it++) {
       if (this.contact) this.contact.ramp = rampN === 0 ? 1.0 : Math.min(1.0, 0.01 + 0.99 * st.iteration / rampN);
@@ -606,6 +758,7 @@ export class CpuSolver {
       }
       for (let i = 0; i < 3 * n; i++) F[i] += L.total[i];
       if (this.contact) this.contact.apply(st, F, T);
+      if (fl) fl.apply(st, F, Floor.rampAt(st.iteration, rampN), L.total);
       An.reactions.fill(0);
       for (let i = 0; i < n; i++) if (An.fixedAny[i]) for (let k = 0; k < 3; k++) An.reactions[3 * i + k] = -F[3 * i + k];
       for (let i = 0; i < 3 * n; i++) if (!An.nodeFree[i]) F[i] = 0;
@@ -614,29 +767,52 @@ export class CpuSolver {
         toFrame(st.Q, 4 * j, R);
         for (let k = 0; k < 3; k++) tm[3 * j + k] = R[3 * k] * T[3 * j] + R[3 * k + 1] * T[3 * j + 1] + R[3 * k + 2] * T[3 * j + 2];
       }
-      if (this.contact) {                               // contact righting stiffness follows the contact forces
-        kTw.fill(0); this.contact.addTwistStiffness(st, kTw);
-        for (let j = 0; j < m; j++) for (let k = 0; k < 3; k++) I3[3 * j + k] = sp.mass_scale * Math.max(this.kRotStatic[3 * j + k] + kTw[j], 1e-12);
-      }
+      // frame inertia of this iteration: the static part, the contact righting share (it follows the contact forces)
+      // and the bending coupling of the joints as they are bent now (CosseratRod.kDyn, left by beam.apply above)
+      if (this.contact) { kTw.fill(0); this.contact.addTwistStiffness(st, kTw); }
+      { const kD = this.beam.kDyn; for (let j = 0; j < m; j++) for (let k = 0; k < 3; k++) I3[3 * j + k] = sp.mass_scale * Math.max(this.kRotStatic[3 * j + k] + kTw[j] + kD[3 * j + k], 1e-12); }
       Xprev.set(st.X); Qprev.set(st.Q);
-      if (st.iteration < sp.warmup_iter && this.contact) { F.fill(0); st.V.fill(0); }
+      const warm = st.iteration < sp.warmup_iter && !!this.contact;
+      if (warm) { F.fill(0); st.V.fill(0); if (rb) { rb.rv.fill(0); rb.rw.fill(0); } }
       for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) st.V[3 * i + k] += F[3 * i + k] / this.mass[i];
       for (let j = 0; j < 3 * m; j++) W[j] += tm[j] / I3[j];
-      for (let j = 0; j < m; j++) W[3 * j + 2] = Math.min(Math.max(W[3 * j + 2], -TWIST_RATE_MAX), TWIST_RATE_MAX);
+      for (let j = 0; j < m; j++) { W[3 * j + 2] = Math.min(Math.max(W[3 * j + 2], -TWIST_RATE_MAX), TWIST_RATE_MAX); if (kTw[j] > 0) W[3 * j + 2] *= ROLL_DAMP; }   // roll: rate limit, damping at the crossings
       if (sp.damping !== 1.0) { for (let i = 0; i < 3 * n; i++) st.V[i] *= sp.damping; for (let j = 0; j < 3 * m; j++) W[j] *= sp.damping; }
       for (let i = 0; i < 3 * n; i++) if (!An.nodeFree[i]) st.V[i] = 0;
       for (let i = 0; i < 3 * n; i++) st.X[i] += st.V[i];
+      // rigid-body freedoms, integrated like the nodes: velocity from this iteration's resultant (v += Q / M, speed
+      // limit), then the step x += v + w × (x − c) from the position before the node step, frames turned by w
+      if (rb) {
+        rb.rigidMasses(sp.mass_scale, Mrb);
+        if (!warm) for (let k = 0; k < 3; k++) {
+          rb.rv[k] = Math.min(Math.max((rb.rv[k] + rb.Qt[k] / Mrb[k]) * sp.damping, -rb.vmax), rb.vmax);
+          rb.rw[k] = Math.min(Math.max((rb.rw[k] + rb.Qr[k] / Mrb[3 + k]) * sp.damping, -rb.wmax), rb.wmax);
+        }
+      }
+      const rbMove = rb && (rb.rv[0] !== 0 || rb.rv[1] !== 0 || rb.rv[2] !== 0 || rb.rw[0] !== 0 || rb.rw[1] !== 0 || rb.rw[2] !== 0);
+      if (rbMove) {
+        const v = rb.rv, w = rb.rw, c = rb.c;
+        for (let i = 0; i < n; i++) {
+          const dx = Xprev[3 * i] - c[0], dy = Xprev[3 * i + 1] - c[1], dz = Xprev[3 * i + 2] - c[2];
+          st.X[3 * i] += v[0] + w[1] * dz - w[2] * dy; st.X[3 * i + 1] += v[1] + w[2] * dx - w[0] * dz; st.X[3 * i + 2] += v[2] + w[0] * dy - w[1] * dx;
+        }
+        qexp(w[0], w[1], w[2], qw);
+      }
       for (let j = 0; j < m; j++) {                     // body-frame rotation: q ← q ⊗ exp(ω)
         qexp(W[3 * j], W[3 * j + 1], W[3 * j + 2], dq);
         q0[0] = st.Q[4 * j]; q0[1] = st.Q[4 * j + 1]; q0[2] = st.Q[4 * j + 2]; q0[3] = st.Q[4 * j + 3];
-        qmul(q0, dq, qq); qnormalize(qq);
+        qmul(q0, dq, qq);
+        if (rbMove) { q0[0] = qq[0]; q0[1] = qq[1]; q0[2] = qq[2]; q0[3] = qq[3]; qmul(qw, q0, qq); }   // world rotation of the rigid step
+        qnormalize(qq);
         st.Q[4 * j] = qq[0]; st.Q[4 * j + 1] = qq[1]; st.Q[4 * j + 2] = qq[2]; st.Q[4 * j + 3] = qq[3];
       }
       for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) kin[3 * i + k] = this.mass[i] * st.V[3 * i + k] ** 2;
       for (let j = 0; j < 3 * m; j++) kinR[j] = I3[j] * W[j] ** 2;
       let ke = 0.5 * (pairwiseSum(kin) + pairwiseSum(kinR));
+      if (rb) for (let k = 0; k < 3; k++) ke += 0.5 * (Mrb[k] * rb.rv[k] ** 2 + Mrb[3 + k] * rb.rw[k] ** 2);   // the rigid step counts
       if (sp.kinetic_damping && ke < this.kePrev) {
         st.X.set(Xprev); st.Q.set(Qprev); st.V.fill(0); W.fill(0); ke = 0.0;
+        if (rb) { rb.rv.fill(0); rb.rw.fill(0); }
       }
       this.kePrev = ke;
       st.iteration += 1;
@@ -645,16 +821,17 @@ export class CpuSolver {
       if (c && c.p.augmented && (c.p.al_every | 0) > 0 && st.iteration > rampN && (st.iteration - rampN) % (c.p.al_every | 0) === 0) c.updateMultipliers(st);
       const H = st.history;
       H.kinetic.push(ke);
-      H.strain.push(this.beam.energy + (c ? c.energy : 0));
+      const eFloor = this.floor ? this.floor.energy : 0;
+      H.strain.push(this.beam.energy + (c ? c.energy : 0) + eFloor);
       H.bending.push(this.beam.energyParts.bending); H.torsion.push(this.beam.energyParts.torsion); H.stretch.push(this.beam.energyParts.stretch);
       (H.shear || (H.shear = [])).push(this.beam.energyParts.shear);
-      H.contact.push(c ? c.energy : 0);
+      H.contact.push((c ? c.energy : 0) + eFloor);
       let fmax = 0, tmax = 0;
       for (let i = 0; i < n; i++) { const f = Math.sqrt(F[3 * i] ** 2 + F[3 * i + 1] ** 2 + F[3 * i + 2] ** 2); if (f > fmax) fmax = f; }
       for (let j = 0; j < m; j++) { const t = Math.sqrt(tm[3 * j] ** 2 + tm[3 * j + 1] ** 2 + tm[3 * j + 2] ** 2); if (t > tmax) tmax = t; }
       const fref = this.forceRef();
-      this.residualParts = { force: n ? fmax / fref : 0, torque: m ? tmax / (fref * this.lRef) : 0 };
-      const resid = Math.max(this.residualParts.force, this.residualParts.torque);
+      this.residualParts = { force: n ? fmax / fref : 0, torque: m ? tmax / (fref * this.lRef) : 0, rigid: rb ? rb.rigidResidual(fref) : 0 };
+      const resid = Math.max(this.residualParts.force, this.residualParts.torque, this.residualParts.rigid);
       st.residual = st.iteration > sp.warmup_iter ? resid : Infinity;
       H.residual.push(st.residual);
       if (st.residual <= sp.tol) { this.converged = true; broke = true; break; }
@@ -671,7 +848,8 @@ export class CpuSolver {
     let lmin = Infinity; for (const v of st.jLen) lmin = Math.min(lmin, v);
     c = st.p ? c / Math.max(lmin, 1e-12) : 0;
     let d = 0; if (this.contact) { d = -Infinity; for (const v of this.contact.Fn) d = Math.max(d, v); }
-    return Math.max(a, b, c, d, 1e-12);
+    const e = this.floor ? this.floor.FnMax : 0;
+    return Math.max(a, b, c, d, e, 1e-12);
   }
 
   run(maxIter = null, callback = null) {
@@ -732,10 +910,13 @@ export function buildResults(sv) {
   const reactions = new Map();
   for (const [fk, nid] of st.nodeFrameIds) if (sv.anchors.fixedNodes.includes(nid)) reactions.set(fk, [sv.anchors.reactions[3 * nid], sv.anchors.reactions[3 * nid + 1], sv.anchors.reactions[3 * nid + 2], 0, 0, 0]);
   const H = st.history, last = (a) => (a.length ? a[a.length - 1] : 0);
+  // the ground: its force on every node (world axes), the contact state (0 clear, 1 stick, 2 slip) and the resultant
+  const fl = sv.floor;
+  const floor = fl ? { z: +fl.p.z, mu: +fl.p.mu, F: Float64Array.from(fl.F), state: Uint8Array.from(fl.state), ...fl.summary() } : null;
   return {
     iterations: st.iteration, converged: sv.converged, residual: st.residual,
-    segment: seg, knot, disp, reactions,
-    energies: { strain: last(H.strain), kinetic: last(H.kinetic), beam: sv.beam.energy, bending: sv.beam.energyParts.bending, torsion: sv.beam.energyParts.torsion, stretch: sv.beam.energyParts.stretch, shear: sv.beam.energyParts.shear || 0, contact: c ? c.energy : 0 },
+    segment: seg, knot, disp, reactions, floor,
+    energies: { strain: last(H.strain), kinetic: last(H.kinetic), beam: sv.beam.energy, bending: sv.beam.energyParts.bending, torsion: sv.beam.energyParts.torsion, stretch: sv.beam.energyParts.stretch, shear: sv.beam.energyParts.shear || 0, contact: c ? c.energy : 0, floor: fl ? fl.energy : 0 },
     rod: 'cosserat',
   };
 }

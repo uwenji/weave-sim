@@ -56,10 +56,11 @@ header lines); the folded Monitor's header keeps the run / step / reset buttons.
    contact type, dent, M_rot, θ, λ) or the displacement, *smooth* (node values along each lath) or per segment,
    *bands*, *delta* (after `Zero`) and a fixed range. *Diagram*: the member diagrams (Mx, My, Vy, Vx, T, N, curvature)
    hung on the laths, the deflected shape, contact forces and reactions, with value labels at the extremes or per lath.
-   *View*: theme, layers (laths, centrelines, knots, mesh, wire, shadow, joints, loads, anchors, probes, frames,
+   *View*: layers (laths, centrelines, knots, mesh, wire, shadow, joints, loads, anchors, probes, frames,
    *bounding box*: the axis-aligned box of the laths as drawn — sections and deformation × included — in dashed lines,
    with W (X), D (Y) and H (Z) labelled on the edges facing you),
-   deformation ×, arrow size, turntable. **Hover** a lath: a small window shows the lath, the position along it and the
+   deformation ×, arrow size, turntable. The light / dark **theme switch** is at the right end of the top bar (it
+   follows the system until you use it). **Hover** a lath: a small window shows the lath, the position along it and the
    local value of the colour layer and the diagram (at a crossing also its forces).
 6. **Load test** (Monitor run bar) — relax (`Run`), then `Zero`: the relaxed geometry becomes the reference
    (displacement and slip zero — the zigzag of the input mesh that the relaxation took out is not counted), the solver
@@ -80,10 +81,16 @@ header lines); the folded Monitor's header keeps the run / step / reset buttons.
    type the lower and / or upper height and `select` (an empty box means that end of the model; shift-click adds), and
    **Box select…** (key B) — drag a rectangle in the view, every crossing frame inside is selected through the model
    (shift adds, alt removes, a plain click still picks one frame; Esc leaves). Anchors: quick-select all start / end /
-   boundary frames, tick the fixed DOFs. Every point load is editable in its row: the three components (in world
+   boundary frames, tick the fixed DOFs. **Ground** (the row above *fix*): tick *on* for a horizontal plane that no
+   lath can pass, at height `Z` (the first tick puts it under the lowest point of the laths; `at lowest` does that
+   again for the current state) with its own friction coefficient `μ` — a lath on it sticks until the sideways force
+   exceeds μ × the normal force, then slides. It works next to the anchors; with no anchor at all the model is free
+   and falls, tips and slides as a whole until the ground carries it (the readout under the row shows the nodes on
+   the ground and the ground's resultant against the sum of the loads; Display › diagram `R` draws its forces, the
+   plane is shown with the anchors layer). Every point load is editable in its row: the three components (in world
    axes, or in the frame axes X width / Y normal / Z tangent — the little selector), and `|F|`, which rescales the
-   vector. Loads, anchors, material, beam and contact apply live to the running model; section, weave and units
-   rebuild it.
+   vector. Loads, anchors, the ground, material, beam and contact apply live to the running model; section, weave
+   and units rebuild it.
 9. **Lath groups** (3) — tick *lath groups*, choose the group to edit, `Select laths…` and click laths in the view: the
    selected laths turn orange with a dark line along them, the others fade (click a lath again to remove it, click
    anywhere else to clear, `laths of group` takes the group's current laths, Esc leaves). `Assign … to group n`.

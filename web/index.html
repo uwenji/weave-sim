@@ -24,6 +24,12 @@
     <span id="st-run" class="st"></span>
     <span id="st-msg" class="st dim"></span>
     <button id="st-backend" class="st pill" title="solver backend — click to switch">…</button>
+    <!-- the theme switch (as in TryTriWeave): light ⟷ dark, the knob on the side in use; follows the system until it is used -->
+    <button id="theme-switch" class="tswitch" type="button" role="switch" aria-checked="false" aria-label="dark theme" title="light / dark — follows the system until you switch it">
+      <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1" fill="currentColor"/><g stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 1.2v1.9M8 12.9v1.9M1.2 8h1.9M12.9 8h1.9M3.2 3.2l1.35 1.35M11.45 11.45l1.35 1.35M3.2 12.8l1.35-1.35M11.45 4.55l1.35-1.35"/></g></svg>
+      <span class="track"><span class="knob"></span></span>
+      <svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 10.1A5.6 5.6 0 0 1 5.9 2.8a5.7 5.7 0 1 0 7.3 7.3z" fill="currentColor"/></svg>
+    </button>
   </header>
 
   <aside id="panel" aria-label="Setup">
@@ -218,6 +224,13 @@
           <button class="btn sm toggle" id="btn-boxmode" title="drag a rectangle in the view to select the crossing frames inside it (shift adds, alt removes; Esc leaves)">Box select…</button>
           <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Z range: all crossing frames between the two heights (the model's extent is shown as the placeholder; shift-click adds to the selection).\nBox select…: left-drag a rectangle in the view; every frame inside is selected, through the model (shift adds, alt removes). The selection is then used by Add for selection — and by the point loads in 5 Loads.">i</button></div>
         <div class="readout" id="ro-zrange"></div>
+        <div class="row" id="row-floor"><span class="hint">ground</span>
+          <label class="check" title="a horizontal plane that no lath can pass"><input type="checkbox" id="ck-floor">on</label>
+          <span class="pair"><span class="hint">Z</span><input type="number" id="nb-floorz" class="num sm" step="any" aria-label="height of the ground"><span class="unit u-len"></span></span>
+          <span class="pair"><span class="hint" title="friction coefficient of the ground">μ</span><input type="number" id="nb-floormu" class="num xs" step="0.05" min="0" aria-label="friction coefficient of the ground"></span>
+          <button class="btn sm" id="btn-floorlow" title="put the ground under the lowest point of the laths as they are now">at lowest</button>
+          <span class="spacer"></span><button type="button" class="info" aria-label="About this" data-tip="Ground: a horizontal plane at height Z that no lath can pass. A lath that reaches it is pushed up (a penalty spring with the stiffness of 4 Contact) and held sideways by Coulomb friction μ: it sticks until the sideways force exceeds μ × the normal force, then slides.\nat lowest: puts the plane under the lowest point of the laths as they are now (ticking the box the first time does the same).\nWith anchors, the ground acts next to them. Without any anchor the model is free: it falls, slides and tips as a whole until the ground carries it.\nThe ground's forces are drawn by Display › diagram R (reactions) and listed in the Results.">i</button></div>
+        <div class="readout" id="ro-floor" hidden></div>
         <div class="row" id="fix-dofs"><span class="hint">fix</span>
           <label class="check"><input type="checkbox" data-dof="0" checked>X</label><label class="check"><input type="checkbox" data-dof="1" checked>Y</label><label class="check"><input type="checkbox" data-dof="2" checked>Z</label>
           <label class="check"><input type="checkbox" data-dof="3">rX</label><label class="check"><input type="checkbox" data-dof="4">rY</label><label class="check"><input type="checkbox" data-dof="5">rZ</label>
@@ -370,8 +383,6 @@
       </div>
 
       <h2 class="with-info">View <button type="button" class="info" aria-label="About this" data-tip="Click a lath next to a crossing to select that frame (shift adds / removes); Esc clears. Hover a crossing for its forces.\nDrag: orbit · right-drag: pan · wheel: zoom. Keys H, F, T, P; Space runs.">i</button></h2>
-      <div class="row"><label>theme</label>
-        <div class="chips inline" id="theme-chips"><button class="chip on" data-theme="auto">auto</button><button class="chip" data-theme="light">light</button><button class="chip" data-theme="dark">dark</button></div></div>
       <div class="chips" id="layer-chips">
         <button class="chip on" data-layer="laths">laths</button><button class="chip" data-layer="lines">centrelines</button><button class="chip on" data-layer="knots">knots</button>
         <button class="chip on" data-layer="mesh">mesh</button><button class="chip" data-layer="wire">wire</button><button class="chip on" data-layer="shadow">shadow</button>

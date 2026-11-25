@@ -16,6 +16,7 @@ Paths: `paths.mjs` (the WeaveSim folder = two levels up, override with `WEAVESIM
 | `gpu_rod_bench.html` | the clamped cantilever and the short deep beam on the GPU against the CPU and Timoshenko |
 | `gpu_diag.html` | where CPU and GPU frames differ: the segments with the largest frame difference, split into bending / shear and roll |
 | `gpu_int_check.html` | the 64-bit integer helpers of the kernels against BigInt |
+| `gpu_floor.html?dome=0&scene=…&iters=…` | the ground (6 Anchors) on WebGPU against the CPU: a lath without anchors (rest, stick, slide, μ = 0) and an example dome standing free |
 | `gpu_bench.html?case=…&B=1,4,16` | throughput: B instances of one scene in the same dispatches, next to the CPU |
 | `calib_small.html` | the batched calibration path on a small self-contained case, CPU against GPU |
 | `calib_gpu.html`, `calib_gpu_p1.html` | the force example's replay on the GPU against the CPU (`calib_gpu.html` also against a Python dump; slow on a software GPU) |
@@ -39,6 +40,8 @@ node web/tests/rod_check.mjs                  # Cosserat rod: forces and torques
 node web/tests/rod_bench.mjs [all|cantilever|short|beamcol|ltb|kirchhoff_limit]   # the Cosserat rod against closed forms (Timoshenko, Haringx, LTB, the shear-free limit)
 node web/tests/rod_contact_check.mjs [cases|scenes]   # the Cosserat rod on the crossing cases and the example domes
 node web/tests/stability_check.mjs [euler|ltb|dome]   # stability check: Euler column, lateral–torsional buckling, dome timing
+node web/tests/inertia_check.mjs [other web/js]   # frame inertia against the tangent stiffness: λ_max(M⁻¹K) < 2 on a pinned arc bent 0.1–0.8 rad per joint (power iteration), and it relaxes
+node web/tests/floor_check.mjs                # the ground: a free lath falls, tips flat and rests (ΣF = weight), sticks below μW, slides on the cone above, μ = 0, pinned end
 python web/tests/python/disc_ref.py           # discretisation reference (solved state, components, energy)
 node web/tests/disc_check.mjs                 # discretisation / diagram node values / joints against it
 python web/tests/python/export_ref.py         # Python Rhino export of a solved state (needs pip install rhino3dm)

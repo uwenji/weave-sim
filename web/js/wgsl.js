@@ -6,8 +6,11 @@
 //   k_force  joints: Ψ = log(R_aᵀR_b), m = B (Ψ/l̄ − Ω0), torques ±R_a J_l⁻ᵀ(Ψ) m; clamp joints (rotation anchors)
 //            against the frozen frames; contacts (forces, lever and friction torques on the segment frames, righting
 //            stiffness)
+//   k_floor  (only with a ground, scene.floor) nodes: the plane z = z0 under the section — penalty normal force, stick /
+//            slip friction about a stick point per node — and the sums of the rigid-body freedoms
+//   k_rb     (only with a ground) the six rigid-body velocities of a model without anchors (Floor in solver_cpu.js)
 //   k_int    nodes: loads, reactions, anchors, v += F/m, x += v; segments: inertia per body axis (static + the contact
-//            share of this iteration), ω += Rᵀ T / I, roll-rate limit, q ← q ⊗ exp(ω)
+//            share and the bending coupling of this iteration), ω += Rᵀ T / I, roll-rate limit, q ← q ⊗ exp(ω)
 //   k_ctrl   reductions, Barnes kinetic damping (roll back to the kinetic-energy peak), residual, history, UTM protocol
 //
 // Precision scheme (WebGPU has no f64):
@@ -87,18 +90,19 @@ const N: u32 = ${u(L.N)}; const M: u32 = ${u(L.M)}; const P: u32 = ${u(L.P)}; co
 const NONE: u32 = 0xffffffffu;
 const SUPPORT_SMOOTH: f32 = 0.03;
 const TWIST_RATE_MAX: f32 = 0.015;      // 0.5 · SUPPORT_SMOOTH: roll step per iteration (solver_cpu.js)
+const ROLL_DAMP: f32 = 0.5;            // roll-rate factor per iteration of a segment that carries a crossing (solver_cpu.js)
 const AL_FREE_MIN: f32 = 0.25;          // free weight below which a contact point counts as support-controlled (no multiplier)
 const PI: f32 = 3.14159265358979;
 const HN: u32 = ${u(L.HN)}; const HS: u32 = ${u(L.HS)};
 const NWG: u32 = ${u(L.NWG)};
-const NSLOT: u32 = 3u;
+const NSLOT: u32 = ${u(L.NSLOT)}; const PSTR: u32 = ${u(L.PSTR)};      // reduction slots (k_prep, k_force, k_int, k_floor) × floats per entry
 // topo (u32)
 const T_SEG0 = ${u(L.t.seg0)}; const T_SEG1 = ${u(L.t.seg1)}; const T_J0 = ${u(L.t.j0)}; const T_J1 = ${u(L.t.j1)}; const T_CS = ${u(L.t.cs)};
 const T_NSA = ${u(L.t.nsa)}; const T_NSB = ${u(L.t.nsb)}; const T_KOFF = ${u(L.t.koff)}; const T_KNSEG = ${u(L.t.knseg)}; const T_KEN = ${u(L.t.ken)};
 const T_L0I = ${u(L.t.l0i)};            // rest lengths as 64-bit integers (2^-PB)
 // geo (f32): shared, then per instance
 const G_L0 = ${u(L.g.l0)}; const G_JLEN = ${u(L.g.jlen)}; const G_CLEN = ${u(L.g.clen)}; const G_WK = ${u(L.g.wk)}; const G_HK = ${u(L.g.hk)};
-const G_KW = ${u(L.g.kw)}; const G_KH = ${u(L.g.kh)};
+const G_KW = ${u(L.g.kw)}; const G_KH = ${u(L.g.kh)}; const G_NW = ${u(L.g.nw)}; const G_NH = ${u(L.g.nh)};
 const G_STIFF = ${u(L.g.stiff)}; const G_OM = ${u(L.g.om)}; const G_MASS = ${u(L.g.mass)}; const G_KROT = ${u(L.g.krot)};
 const G_LC = ${u(L.g.lc)}; const G_LL = ${u(L.g.ll)}; const G_CB = ${u(L.g.cb)};
 const G_FC90 = ${u(L.g.fc90)}; const G_E90 = ${u(L.g.e90)}; const G_HS = ${u(L.g.hs)};
@@ -106,6 +110,7 @@ const G_FC90 = ${u(L.g.fc90)}; const G_E90 = ${u(L.g.e90)}; const G_HS = ${u(L.g
 const I_X = ${u(L.i.x)}; const I_XP = ${u(L.i.xp)}; const I_X0 = ${u(L.i.x0)}; const I_U = ${u(L.i.u)};
 const I_SLIP = ${u(L.i.slip)}; const I_FIX = ${u(L.i.fix)}; const I_LOCK = ${u(L.i.lock)}; const I_KOUT = ${u(L.i.kout)};
 const I_PROBE0 = ${u(L.i.probe0)}; const I_Q = ${u(L.i.q)}; const I_QP = ${u(L.i.qp)}; const I_CQ = ${u(L.i.cq)};
+const I_FA = ${u(L.i.fa)};              // the ground's stick point per node: x, y as 64-bit integers (2^-PB)
 // quaternions: value · 2^-60 (QINV) and the f32 → fixed-point scale 2^(60−32) (QSC)
 const QINV: f32 = 8.673617379884035e-19; const QSC: f32 = 268435456.0;
 // fst (f32): float state per instance
@@ -118,9 +123,11 @@ const F_REACT = ${u(L.f.react)}; const F_LSEG = ${u(L.f.lseg)}; const F_R = ${u(
 const F_QN = ${u(L.f.qn)};
 const F_HIST = ${u(L.f.hist)}; const F_OUT = ${u(L.f.out)}; const NOUT = ${u(L.NOUT)};
 const F_PENACC = ${u(L.f.penacc)};
+const F_FFL = ${u(L.f.ffl)};            // the ground's force on every node (x, y, z) and its state (0 clear, 1 stick, 2 slip)
 // acc (atomic u32): fixed-point accumulators per instance — node forces (world), segment torques (body axes of the
 // segment), contact righting stiffness
 const A_F = ${u(L.a.f)}; const A_T = ${u(L.a.t)}; const A_K = ${u(L.a.k)};
+const A_KR = ${u(L.a.kr)};              // bending-coupling share of the frame stiffness per body axis (CosseratRod.kDyn), torque scale
 
 struct IP {                         // per-instance parameters (host-written)
   mass_scale: f32, damping: f32, kin_damp: u32, warmup: u32,
@@ -136,6 +143,13 @@ struct IP {                         // per-instance parameters (host-written)
   avg: u32, pad1: u32, pad2: u32, pad3: u32,
   axis_x: f32, axis_y: f32, axis_z: f32, k_pad: f32,
   sched: array<f32, 64>,            // force (mode 1) or structure travel (mode 2) per increment
+  // the ground (scene.floor): the plane's z as a 64-bit integer (2^-PB); stiffness = the contact penalties (strength,
+  // stick). Rigid-body freedoms of a model without anchors: speed limits, model radius, mass factor RB_MASS and the
+  // least lever² (RB_LEVER · radius)²
+  floor_on: u32, floor_mu: f32, floor_zl: u32, floor_zh: u32,
+  rb_on: u32, rb_vmax: f32, rb_wmax: f32, rb_rad: f32,
+  pad_g0: u32, pad_g1: u32, pad_g2: u32, pad_g3: u32,
+  pad_g4: u32, pad_g5: u32, rb_mass: f32, rb_lev2: f32,
 };
 struct CT {                         // per-instance control (device-written; host reads, resets flags)
   iter: u32, done: u32, rollback: u32, al_update: u32,
@@ -147,7 +161,14 @@ struct CT {                         // per-instance control (device-written; hos
   // UTM read-out sums over the averaging window, exact 64-bit fixed point: probe travel Σ(X − P0) per axis
   // (2^-PB) and the reaction along the probe axis (2^-FB) — one rounding when the average is formed
   adx: vec2<u32>, ady: vec2<u32>, adz: vec2<u32>, arr: vec2<u32>,
-  res_f: f32, pad_c: u32, pad_d: u32, pad_e: u32,     // force part of the residual
+  res_f: f32, e_floor: f32, fn_floor: f32, res_rb: f32,   // force part of the residual; the ground: energy, max F_n, rigid part of the residual
+  // rigid-body freedoms (k_rb): velocities per iteration, the unbalanced resultant max(|Q_t|, |Q_r| / R), masses
+  // and the reference point of the rotation, the centroid of the nodes (64-bit, 2^-PB; k_rb moves it after the nodes)
+  rvx: f32, rvy: f32, rvz: f32, rb_q: f32,
+  rwx: f32, rwy: f32, rwz: f32, pad_c: u32,
+  mtx: f32, mty: f32, mtz: f32, mrx: f32,
+  mry: f32, mrz: f32, rcx: vec2<u32>,
+  rcy: vec2<u32>, rcz: vec2<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> topo: array<u32>;
@@ -162,6 +183,9 @@ struct CT {                         // per-instance control (device-written; hos
 var<workgroup> wg_act: u32;
 var<workgroup> rs: array<vec4<f32>, 64>;
 var<workgroup> rm: array<vec4<f32>, 64>;
+var<workgroup> rs2: array<vec4<f32>, 64>;
+var<workgroup> rs3: array<vec4<f32>, 64>;
+var<workgroup> rs4: array<vec4<f32>, 64>;
 
 
 // ---------------------------------------------------------------------------------------------- accurate elementary functions
@@ -240,6 +264,11 @@ fn addF(b: u32, i: u32, f: vec3<f32>, sc: f32) {
 fn addT(b: u32, j: u32, t: vec3<f32>, sc: f32) {
   let w = A_T + (b * M + j) * 6u;
   acc_add(w, f_i64(t.x, sc)); acc_add(w + 2u, f_i64(t.y, sc)); acc_add(w + 4u, f_i64(t.z, sc));
+}
+/** rotational stiffness of segment j per body axis that follows the state (the bent joints) */
+fn addKR(b: u32, j: u32, k: vec3<f32>, sc: f32) {
+  let w = A_KR + (b * M + j) * 6u;
+  acc_add(w, f_i64(k.x, sc)); acc_add(w + 2u, f_i64(k.y, sc)); acc_add(w + 4u, f_i64(k.z, sc));
 }
 
 // ---------------------------------------------------------------------------------------------- positions
@@ -331,9 +360,25 @@ fn reduce_store(b: u32, kern: u32, wg: u32, lid: u32, s: vec4<f32>, m: vec4<f32>
     workgroupBarrier();
   }
   if (lid == 0u) {
-    let o = ((b * NSLOT + kern) * NWG + wg) * 8u;
+    let o = ((b * NSLOT + kern) * NWG + wg) * PSTR;
     part[o] = rs[0].x; part[o + 1u] = rs[0].y; part[o + 2u] = rs[0].z; part[o + 3u] = rs[0].w;
     part[o + 4u] = rm[0].x; part[o + 5u] = rm[0].y; part[o + 6u] = rm[0].z; part[o + 7u] = rm[0].w;
+  }
+}
+/** the same with three more sums (slot 3, the ground kernel) */
+fn reduce_store3(b: u32, wg: u32, lid: u32, s: vec4<f32>, s2: vec4<f32>, s3: vec4<f32>, s4: vec4<f32>, m: vec4<f32>) {
+  rs[lid] = s; rs2[lid] = s2; rs3[lid] = s3; rs4[lid] = s4; rm[lid] = m; workgroupBarrier();
+  for (var k = 32u; k > 0u; k = k >> 1u) {
+    if (lid < k) { rs[lid] = rs[lid] + rs[lid + k]; rs2[lid] = rs2[lid] + rs2[lid + k]; rs3[lid] = rs3[lid] + rs3[lid + k]; rs4[lid] = rs4[lid] + rs4[lid + k]; rm[lid] = max(rm[lid], rm[lid + k]); }
+    workgroupBarrier();
+  }
+  if (lid == 0u) {
+    let o = ((b * NSLOT + 3u) * NWG + wg) * PSTR;
+    part[o] = rs[0].x; part[o + 1u] = rs[0].y; part[o + 2u] = rs[0].z; part[o + 3u] = rs[0].w;
+    part[o + 4u] = rm[0].x; part[o + 5u] = rm[0].y; part[o + 6u] = rm[0].z; part[o + 7u] = rm[0].w;
+    part[o + 8u] = rs2[0].x; part[o + 9u] = rs2[0].y; part[o + 10u] = rs2[0].z; part[o + 11u] = rs2[0].w;
+    part[o + 12u] = rs3[0].x; part[o + 13u] = rs3[0].y; part[o + 14u] = rs3[0].z; part[o + 15u] = rs3[0].w;
+    part[o + 16u] = rs4[0].x; part[o + 17u] = rs4[0].y; part[o + 18u] = rs4[0].z; part[o + 19u] = rs4[0].w;
   }
 }
 
@@ -496,9 +541,15 @@ fn k_force(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let lbar = geo[G_JLEN + j];
     let so = G_STIFF + (b * M + s0) * 5u;
     let d = psi / lbar - gld3(G_OM + (b * P + j) * 3u);
-    let m = vec3<f32>(geo[so + 1u], geo[so + 2u], geo[so + 3u]) * d;      // (EIx, EIy, GJ)(κ − κ0)
+    let Bv = vec3<f32>(geo[so + 1u], geo[so + 2u], geo[so + 3u]);
+    let m = Bv * d;                                                       // (EIx, EIy, GJ)(κ − κ0)
     let J = jlt(psi, rr.w, m);                                            // τ = R_a J: J in a's axes, R(Δq)ᵀ J in b's
     addT(b, s0, J, tsc); addT(b, s1, -rotT(r, J), tsc);
+    // frame-inertia share of the bent joint (CosseratRod.kDyn): a frame that turns about one axis at a joint bent by Ψ
+    // also works against the other two stiffnesses, ¼ B_β (Ψ × e_α)_β² / l̄ — on both segments
+    let p2 = psi * psi;
+    let kd = (0.25 / lbar) * vec3<f32>(Bv.y * p2.z + Bv.z * p2.y, Bv.x * p2.z + Bv.z * p2.x, Bv.x * p2.y + Bv.y * p2.x);
+    addKR(b, s0, kd, tsc); addKR(b, s1, kd, tsc);
     st3(F_MJ + (b * P + j) * 3u, m);
     s.x = 0.5 * lbar * (m.x * d.x + m.y * d.y);
     s.y = 0.5 * lbar * m.z * d.z;
@@ -727,6 +778,122 @@ fn k_force(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
   reduce_store(b, 1u, wid.x, lid.x, s, mx);
 }
 
+// ============================================================================================== 2b · ground
+// nodes (Floor.apply of solver_cpu.js): penetration of the section's lowest point below the plane, from the exact
+// integer height z0 − z and the half-extent ½ w |X·e_z| + ½ h |Y·e_z| of the node's mean frame; F_n = k_n · pen;
+// friction about the node's stick point a (64-bit, moved exactly): S = (x − a)_xy, k_t |S| > μ F_n → a is dragged after
+// the node until the force is back on the cone; clear of the ground the stick point follows the node. Sums for the
+// rigid-body freedoms: the resultant of loads + ground (force, moment about the reference point c), the nodes in
+// contact and their Σ (x − c)² per axis, and Σ (x − c) over all nodes (k_rb moves c to the centroid with it).
+@compute @workgroup_size(64)
+fn k_floor(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  let b = wid.y;
+  if (lid.x == 0u) { wg_act = select(0u, inst_live(b), ip[b].floor_on == 1u); }
+  if (workgroupUniformLoad(&wg_act) == 0u) { return; }
+  var s = vec4<f32>(0.0); var s2 = vec4<f32>(0.0); var s3 = vec4<f32>(0.0); var s4 = vec4<f32>(0.0); var mx = vec4<f32>(0.0);
+  let i = gid.x;
+  if (i < N) {
+    let pinv = ip[b].pinv; let psc = ip[b].psc;
+    let ramp = ramp_of(b);
+    let kn = ramp * ip[b].strength; let kt = ramp * ip[b].stick;
+    let ox = xoff(b, i, false);
+    let x = ld64(ox); let y = ld64(ox + 2u); let z = ld64(ox + 4u);
+    let R = qframe(ldq(F_QN + (b * N + i) * 4u));
+    // the half-extent joins the height difference as an integer: the penetration then carries f32 precision relative
+    // to itself, not to the section size (in f32 alone F_n would move in steps of k_n · 6e-8 · h)
+    let clr = 0.5 * geo[G_NW + i] * abs(R.x.z) + 0.5 * geo[G_NH + i] * abs(R.y.z);
+    let pen = i64_f(i64_add(i64_sub(vec2<u32>(ip[b].floor_zl, ip[b].floor_zh), z), f_i64(clr, psc)), pinv);
+    let d = vec3<f32>(i64_f(i64_sub(x, ctl[b].rcx), pinv), i64_f(i64_sub(y, ctl[b].rcy), pinv), i64_f(i64_sub(z, ctl[b].rcz), pinv));
+    s4 = vec4<f32>(d, 0.0);
+    let oa = I_FA + (b * N + i) * 4u;
+    var fg = vec3<f32>(0.0); var state = 0.0;                       // the ground's force on the node
+    if (pen > 0.0) {
+      let Fn = kn * pen;
+      var ax = ld64(oa); var ay = ld64(oa + 2u);
+      let S = vec2<f32>(i64_f(i64_sub(x, ax), pinv), i64_f(i64_sub(y, ay), pinv));
+      let Ftv = kt * sqrt_acc(dot(S, S)); let limit = ip[b].floor_mu * Fn;
+      var e = S;
+      state = 1.0;
+      if (Ftv > limit) {
+        let sc = 1.0 - limit / max(Ftv, 1e-12);                     // return mapping: back onto the cone
+        if (sc > 0.0) {
+          ax = i64_add(ax, f_i64(S.x * sc, psc)); ay = i64_add(ay, f_i64(S.y * sc, psc));
+          st64(oa, ax); st64(oa + 2u, ay);
+          e = vec2<f32>(i64_f(i64_sub(x, ax), pinv), i64_f(i64_sub(y, ay), pinv));
+          state = 2.0;
+        }
+      }
+      fg = vec3<f32>(-kt * e.x, -kt * e.y, Fn);
+      s2.w = 0.5 * kn * pen * pen + 0.5 * kt * dot(e, e);
+      mx.x = Fn;
+      s3 = vec4<f32>(d * d, 0.0); s.w = 1.0;
+    } else {
+      st64(oa, x); st64(oa + 2u, y);
+    }
+    let ofl = F_FFL + (b * N + i) * 4u;
+    st3(ofl, fg); fst[ofl + 3u] = state;
+    addF(b, i, fg, ip[b].fsc);
+    var load = gld3(G_LC + (b * N + i) * 3u);                       // the external load of this node, as k_int forms it
+    let ll = gld3(G_LL + (b * N + i) * 3u);
+    if (ll.x != 0.0 || ll.y != 0.0 || ll.z != 0.0) { load = load + R.x * ll.x + R.y * ll.y + R.z * ll.z; }
+    if (ip[b].mode == 1u && i == ip[b].probe) { load = load + vec3<f32>(ctl[b].pfx, ctl[b].pfy, ctl[b].pfz); }
+    let g = load + fg;
+    s = vec4<f32>(g, s.w);
+    s2 = vec4<f32>(cross(d, g), s2.w);
+  }
+  reduce_store3(b, wid.x, lid.x, s, s2, s3, s4, mx);
+}
+
+// ============================================================================================== 2c · rigid-body freedoms (one workgroup per instance)
+// A model that only the ground holds has six rigid-body modes that dynamic relaxation with the nodes' fictitious masses
+// barely moves. They get their own freedoms, driven by the resultant of the external forces (loads + ground) alone:
+// v += Q_t / M_t, w += Q_r / M_r, speed limits; masses from the ground's stiffness under the nodes in contact
+// (Floor.rigidMasses). The reference point c of the rotation is the centroid of the nodes: with an unbalanced resultant
+// (a model sliding or falling) any other point would turn the model. It is moved here by the mean of x − c, and the
+// moment is shifted with it. k_int adds the step v + w × (x − c) to every node and turns every frame by w.
+@compute @workgroup_size(64)
+fn k_rb(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  let b = wid.y;
+  if (lid.x == 0u) { wg_act = select(0u, inst_live(b), ip[b].floor_on == 1u); }
+  if (workgroupUniformLoad(&wg_act) == 0u) { return; }
+  var ss = vec4<f32>(0.0); var s2 = vec4<f32>(0.0); var s3 = vec4<f32>(0.0); var s4 = vec4<f32>(0.0); var mm = vec4<f32>(0.0);
+  for (var w = lid.x; w < NWG_G; w += 64u) {
+    let o = ((b * NSLOT + 3u) * NWG + w) * PSTR;
+    ss = ss + vec4<f32>(part[o], part[o + 1u], part[o + 2u], part[o + 3u]);
+    mm = max(mm, vec4<f32>(part[o + 4u], part[o + 5u], part[o + 6u], part[o + 7u]));
+    s2 = s2 + vec4<f32>(part[o + 8u], part[o + 9u], part[o + 10u], part[o + 11u]);
+    s3 = s3 + vec4<f32>(part[o + 12u], part[o + 13u], part[o + 14u], part[o + 15u]);
+    s4 = s4 + vec4<f32>(part[o + 16u], part[o + 17u], part[o + 18u], part[o + 19u]);
+  }
+  rs[lid.x] = ss; rm[lid.x] = mm; rs2[lid.x] = s2; rs3[lid.x] = s3; rs4[lid.x] = s4; workgroupBarrier();
+  for (var k = 32u; k > 0u; k = k >> 1u) {
+    if (lid.x < k) { rs[lid.x] = rs[lid.x] + rs[lid.x + k]; rs2[lid.x] = rs2[lid.x] + rs2[lid.x + k]; rs3[lid.x] = rs3[lid.x] + rs3[lid.x + k]; rs4[lid.x] = rs4[lid.x] + rs4[lid.x + k]; rm[lid.x] = max(rm[lid.x], rm[lid.x + k]); }
+    workgroupBarrier();
+  }
+  if (lid.x != 0u) { return; }
+  // the centroid: c ← c + mean(x − c); the moment about the new point is Q_r − Δc × Q_t
+  let dc = rs4[0].xyz / f32(max(N, 1u));
+  ctl[b].rcx = i64_add(ctl[b].rcx, f_i64(dc.x, ip[b].psc)); ctl[b].rcy = i64_add(ctl[b].rcy, f_i64(dc.y, ip[b].psc)); ctl[b].rcz = i64_add(ctl[b].rcz, f_i64(dc.z, ip[b].psc));
+  let Qt = rs[0].xyz; let nc = max(rs[0].w, 1.0); let Qr = rs2[0].xyz - cross(dc, Qt); let d2 = rs3[0].xyz;
+  let ramp = ramp_of(b);
+  let kn = ramp * ip[b].strength; let kt = ramp * ip[b].stick; let f = ip[b].mass_scale * ip[b].rb_mass;
+  let rmin = ip[b].rb_lev2 * kn;
+  let mth = max(f * nc * kt, 1e-30);
+  let Mt = vec3<f32>(mth, mth, max(f * nc * kn, 1e-30));
+  let Mr = max(f * max(vec3<f32>(kn * d2.y + kt * d2.z, kn * d2.x + kt * d2.z, kt * (d2.x + d2.y)), vec3<f32>(rmin)), vec3<f32>(1e-30));
+  var rv = vec3<f32>(0.0); var rw = vec3<f32>(0.0);
+  if (ip[b].rb_on == 1u && !(ctl[b].iter < ip[b].warmup && ip[b].contacts == 1u)) {
+    let vm = ip[b].rb_vmax; let wm = ip[b].rb_wmax; let dmp = ip[b].damping;
+    rv = clamp((vec3<f32>(ctl[b].rvx, ctl[b].rvy, ctl[b].rvz) + Qt / Mt) * dmp, vec3<f32>(-vm), vec3<f32>(vm));
+    rw = clamp((vec3<f32>(ctl[b].rwx, ctl[b].rwy, ctl[b].rwz) + Qr / Mr) * dmp, vec3<f32>(-wm), vec3<f32>(wm));
+  }
+  ctl[b].rvx = rv.x; ctl[b].rvy = rv.y; ctl[b].rvz = rv.z;
+  ctl[b].rwx = rw.x; ctl[b].rwy = rw.y; ctl[b].rwz = rw.z;
+  ctl[b].rb_q = max(len_acc(Qt), len_acc(Qr) / max(ip[b].rb_rad, 1e-12));
+  ctl[b].mtx = Mt.x; ctl[b].mty = Mt.y; ctl[b].mtz = Mt.z; ctl[b].mrx = Mr.x; ctl[b].mry = Mr.y; ctl[b].mrz = Mr.z;
+  ctl[b].e_floor = rs2[0].w; ctl[b].fn_floor = rm[0].x;
+}
+
 // ============================================================================================== 3 · integrate
 // nodes: loads, reactions, anchors, v += F/m, x += v; segments: ω += Rᵀ T / I (body axes), q ← q ⊗ exp(ω)
 @compute @workgroup_size(64)
@@ -767,6 +934,13 @@ fn k_int(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocatio
     st64(ox, i64_add(ld64(ox), f_i64(V.x, pr.psc)));
     st64(ox + 2u, i64_add(ld64(ox + 2u), f_i64(V.y, pr.psc)));
     st64(ox + 4u, i64_add(ld64(ox + 4u), f_i64(V.z, pr.psc)));
+    if (pr.rb_on == 1u) {                                           // rigid step v + w × (x − c), from the position before the node step
+      let d = vec3<f32>(i64_f(i64_sub(ld64(op), ctl[b].rcx), pr.pinv), i64_f(i64_sub(ld64(op + 2u), ctl[b].rcy), pr.pinv), i64_f(i64_sub(ld64(op + 4u), ctl[b].rcz), pr.pinv));
+      let dR = vec3<f32>(ctl[b].rvx, ctl[b].rvy, ctl[b].rvz) + cross(vec3<f32>(ctl[b].rwx, ctl[b].rwy, ctl[b].rwz), d);
+      st64(ox, i64_add(ld64(ox), f_i64(dR.x, pr.psc)));
+      st64(ox + 2u, i64_add(ld64(ox + 2u), f_i64(dR.y, pr.psc)));
+      st64(ox + 4u, i64_add(ld64(ox + 4u), f_i64(dR.z, pr.psc)));
+    }
     s.x = m * dot(V, V);
   } else if (t < N + M) {
     let j = t - N;
@@ -774,11 +948,15 @@ fn k_int(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocatio
     let tm = vec3<f32>(acc_take(w, pr.tinv), acc_take(w + 2u, pr.tinv), acc_take(w + 4u, pr.tinv));   // Rᵀ T (body axes)
     let ktw = acc_take(A_K + (b * M + j) * 2u, pr.kinv);
     mx.z = len_acc(tm);
-    // inertia per body axis: joints, clamps and shear lever (static) + the contact righting share of this iteration
-    let I3 = pr.mass_scale * max(gld3(G_KROT + (b * M + j) * 3u) + vec3<f32>(ktw), vec3<f32>(1e-12));
+    // inertia per body axis: joints, clamps and shear lever (static) + the contact righting share and the bending
+    // coupling of the joints of this iteration
+    let wk = A_KR + (b * M + j) * 6u;
+    let kdy = vec3<f32>(acc_take(wk, pr.tinv), acc_take(wk + 2u, pr.tinv), acc_take(wk + 4u, pr.tinv));
+    let I3 = pr.mass_scale * max(gld3(G_KROT + (b * M + j) * 3u) + vec3<f32>(ktw) + kdy, vec3<f32>(1e-12));
     let ow = F_W + (b * M + j) * 3u;
     var W = ld3(ow) + tm / I3;
     W.z = clamp(W.z, -TWIST_RATE_MAX, TWIST_RATE_MAX);
+    if (ktw > 0.0) { W.z = W.z * ROLL_DAMP; }                         // roll damping at the crossings
     W = W * pr.damping;
     st3(ow, W);
     // q ← q ⊗ exp(W) (body frame), applied as an increment dQ = q ⊗ (exp(W) − 1) and renormalised in delta form
@@ -787,7 +965,15 @@ fn k_int(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocatio
     let q0 = ldqi(oq);
     let a = len_acc(W);
     let s4 = sin_acc(0.25 * a);
-    let dQ = qmul(q0, vec4<f32>(-2.0 * s4 * s4, W * select(0.5, sin_acc(0.5 * a) / a, a > 1e-12)));
+    var dQ = qmul(q0, vec4<f32>(-2.0 * s4 * s4, W * select(0.5, sin_acc(0.5 * a) / a, a > 1e-12)));
+    if (pr.rb_on == 1u) {                                           // world rotation of the rigid step: q ← exp(w) ⊗ q, as an increment
+      let rw = vec3<f32>(ctl[b].rwx, ctl[b].rwy, ctl[b].rwz);
+      let ar = len_acc(rw);
+      if (ar > 0.0) {
+        let r4 = sin_acc(0.25 * ar);
+        dQ = dQ + qmul(vec4<f32>(-2.0 * r4 * r4, rw * select(0.5, sin_acc(0.5 * ar) / ar, ar > 1e-12)), q0 + dQ);
+      }
+    }
     let x = 2.0 * dot(q0, dQ) + dot(dQ, dQ);
     let rt = sqrt_acc(1.0 + x);
     let dtot = dQ - (x / (rt * (1.0 + rt))) * (q0 + dQ);
@@ -806,12 +992,12 @@ fn k_ctrl(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   let b = wid.y;
   if (lid.x == 0u) { wg_act = inst_live(b); }
   if (workgroupUniformLoad(&wg_act) == 0u) { return; }
-  for (var kern = 0u; kern < NSLOT; kern++) {
+  for (var kern = 0u; kern < 3u; kern++) {                          // (slot 3, the ground, is reduced by k_rb)
     var ss = vec4<f32>(0.0); var mm = vec4<f32>(0.0);
     if (kern == 1u) { mm.y = -3e38; }                               // max Fn may be negative (locked crossings)
     let nwg = select(select(NWG_I, NWG_F, kern == 1u), NWG_P, kern == 0u);
     for (var w = lid.x; w < nwg; w += 64u) {
-      let o = ((b * NSLOT + kern) * NWG + w) * 8u;
+      let o = ((b * NSLOT + kern) * NWG + w) * PSTR;
       ss = ss + vec4<f32>(part[o], part[o + 1u], part[o + 2u], part[o + 3u]);
       mm = max(mm, vec4<f32>(part[o + 4u], part[o + 5u], part[o + 6u], part[o + 7u]));
     }
@@ -830,17 +1016,25 @@ fn k_ctrl(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   // max |load|, max |F|, max |Rᵀ T|)
   let sP = tot[0]; let mP = tot[1]; let sF = tot[2]; let mF = tot[3]; let sI = tot[4]; let mI = tot[5];
   var ke = 0.5 * (sI.x + sI.y);
+  if (pr.rb_on == 1u) {                                             // the rigid step counts
+    ke = ke + 0.5 * (c.mtx * c.rvx * c.rvx + c.mty * c.rvy * c.rvy + c.mtz * c.rvz * c.rvz + c.mrx * c.rwx * c.rwx + c.mry * c.rwy * c.rwy + c.mrz * c.rwz * c.rwz);
+  }
   var rollback = 0u;
   if (pr.kin_damp == 1u && ke < c.ke_prev) { rollback = 1u; ke = 0.0; }
+  if (rollback == 1u) { c.rvx = 0.0; c.rvy = 0.0; c.rvz = 0.0; c.rwx = 0.0; c.rwy = 0.0; c.rwz = 0.0; }
   c.rollback = rollback;
   c.ke_prev = ke; c.ke = ke;
   c.iter = c.iter + 1u;
   var fref = max(mI.x, mP.x);
   if (P > 0u) { fref = max(fref, mF.x / max(pr.jlen_min, 1e-12)); }
   if (pr.contacts == 1u && K > 0u) { fref = max(fref, mF.y); }
+  if (pr.floor_on == 1u) { fref = max(fref, c.fn_floor); }
   fref = max(fref, 1e-12);
   let rf = mI.y / fref; let rt = mI.z / (fref * pr.l_ref);
   var resid = max(rf, rt);
+  var rr = 0.0;                                                     // rigid part: the unbalanced resultant of loads + ground
+  if (pr.rb_on == 1u) { rr = c.rb_q / fref; resid = max(resid, rr); }
+  c.res_rb = rr;
   if (c.iter <= pr.warmup) { resid = 3e38; }
   c.resid = resid; c.fref = fref; c.res_f = rf; c.res_t = rt;
   c.e_stretch = sP.x; c.e_shear = sP.y; c.e_bend = sF.x; c.e_tors = sF.y; c.e_cont = sF.z;
@@ -848,6 +1042,7 @@ fn k_ctrl(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   let ho = F_HIST + (b * HN + (c.iter - 1u) % HN) * HS;
   fst[ho] = ke; fst[ho + 1u] = sP.x + sP.y + sF.x + sF.y + sF.z; fst[ho + 2u] = sF.x; fst[ho + 3u] = sF.y;
   fst[ho + 4u] = sP.x; fst[ho + 5u] = sP.y; fst[ho + 6u] = sF.z; fst[ho + 7u] = resid; fst[ho + 8u] = f32(c.iter);
+  if (pr.floor_on == 1u) { fst[ho + 1u] = fst[ho + 1u] + c.e_floor; fst[ho + 6u] = fst[ho + 6u] + c.e_floor; }   // the ground's penalty energy
   c.hist_n = c.hist_n + 1u;
   let conv = resid <= pr.tol;
   if (pr.mode == 0u) {
@@ -898,5 +1093,5 @@ fn k_ctrl(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   }
   ctl[b] = c;
 }
-`.replace(/NWG_P/g, `${L.NWG_P}u`).replace(/NWG_F/g, `${L.NWG_F}u`).replace(/NWG_I/g, `${L.NWG_I}u`);
+`.replace(/NWG_P/g, `${L.NWG_P}u`).replace(/NWG_F/g, `${L.NWG_F}u`).replace(/NWG_I/g, `${L.NWG_I}u`).replace(/NWG_G/g, `${L.NWG_G}u`);
 }

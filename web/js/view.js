@@ -82,6 +82,7 @@ export class View {
     this.layers = {};
     this.visible = { mesh: true, wire: false, laths: true, lines: false, knots: true, loads: true, anchors: true, selection: true, probes: true, frames: false, shadow: true, diagram: true, joints: true, path: true, knotmarks: true, bbox: false };
     this.bbox = null; this.bboxEls = null; this.onBBox = null;      // Display › bounding box: the extents, their labels, an optional listener
+    this.visible.floor = true; this.floorSpec = null; this.groundZ0 = 0;   // the ground plane of 6 Anchors (shown with the anchors)
     this.raycaster = new THREE.Raycaster();
     this.deform = 1.0; this.needsRender = true;
     this.colouring = { mode: 'family' };
@@ -112,7 +113,7 @@ export class View {
     if (this.layers.path) this.layers.path.traverse(o => { if (o.material) o.material.color.copy(this.colFg); });
     this.labelCache.clear();
     if (this.nav) this.nav.applyTheme();
-    if (this.st) { this.recolour(); this.setOverlays(this.overlays || {}); if (this.diagramSpec) this.setDiagram(this.diagramSpec); if (this.jointSpec) this.setJoints(this.jointSpec); if (this.visible.bbox) this._buildBBox(); }
+    if (this.st) { this.recolour(); this.setOverlays(this.overlays || {}); if (this.diagramSpec) this.setDiagram(this.diagramSpec); if (this.jointSpec) this.setJoints(this.jointSpec); if (this.visible.bbox) this._buildBBox(); if (this.floorSpec) this._buildFloor(); }
     this.needsRender = true;
   }
 
@@ -202,6 +203,7 @@ export class View {
     this.needsRender = true; this.visible[name] = on;
     if (name === 'shadow') { this.ground.visible = on; this.sun.castShadow = on; return; }
     if (this.layers[name]) this.layers[name].visible = on;
+    if (name === 'anchors') { this.visible.floor = on; if (this.layers.floor) this.layers.floor.visible = on; }   // the ground goes with the anchors
     if (name === 'diagram') this._setLabels(on && this.diagramSpec ? this.diagramSpec.labels : []);
     if (name === 'laths' || name === 'lines') this.recolour();
     if (name === 'bbox') this._buildBBox();
@@ -247,6 +249,7 @@ export class View {
     const zg = Math.min(mlo[2], lo[2]) - (scene.section.height || hmax);
     const gs = 6 * this.bboxSize;
     this.ground.scale.set(gs, gs, 1); this.ground.position.set(this.center.x, this.center.y, zg);
+    this.groundZ0 = zg; this._buildFloor();                          // with a ground (6 Anchors) the shadow falls on it
     const sc = this.sun.shadow.camera, R0 = 0.78 * this.bboxSize;
     sc.left = -R0; sc.right = R0; sc.top = R0; sc.bottom = -R0; sc.near = 0.05 * this.bboxSize; sc.far = 6 * this.bboxSize; sc.updateProjectionMatrix();
     this.sun.position.copy(this.center).addScaledVector(SUN_DIR, 2.5 * this.bboxSize); this.sun.target.position.copy(this.center); this.sun.target.updateMatrixWorld();
@@ -450,6 +453,38 @@ export class View {
       if (km.instanceColor) km.instanceColor.needsUpdate = true;
     }
     this.needsRender = true;
+  }
+
+  // --- the ground (6 Anchors › ground) -------------------------------------------------------------------------------
+  /** the plane of scene.floor: {z} or null. A faint square under the model with a grid at a round spacing and an
+   *  outline; the shadow plane moves onto it. It is not pickable and is shown with the anchors layer. */
+  setFloor(spec) {
+    const z = spec && Number.isFinite(+spec.z) ? +spec.z : null;
+    if ((this.floorSpec ? this.floorSpec.z : null) === z) return;
+    this.floorSpec = z == null ? null : { z };
+    this._buildFloor();
+  }
+  _buildFloor() {
+    const sp = this.floorSpec;
+    this.ground.position.z = sp ? sp.z + 2e-4 * (this.bboxSize || 1) : this.groundZ0;
+    if (!sp || !this.st) { this._setLayer('floor', null); return; }
+    const d = this.bboxSize, cx = this.center.x, cy = this.center.y, z = sp.z;
+    // grid spacing 1 · 2 · 5 × 10^k model units, about a dozen cells under the model
+    const raw = d / 10, p10 = 10 ** Math.floor(Math.log10(raw)), step = (raw / p10 < 1.5 ? 1 : raw / p10 < 3.5 ? 2 : raw / p10 < 7.5 ? 5 : 10) * p10;
+    const half = Math.ceil(0.8 * d / step) * step;
+    const x0 = Math.round(cx / step) * step, y0 = Math.round(cy / step) * step;   // lines on multiples of the spacing
+    const g = new THREE.Group();
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(2 * half, 2 * half),
+      new THREE.MeshBasicMaterial({ color: this.colFg, transparent: true, opacity: this.dark ? 0.09 : 0.05, side: THREE.DoubleSide, depthWrite: false }));
+    plane.position.set(x0, y0, z); plane.renderOrder = -3; g.add(plane);
+    const grid = [], n = Math.round(2 * half / step);
+    for (let i = 1; i < n; i++) { const t = -half + i * step; grid.push(x0 + t, y0 - half, z, x0 + t, y0 + half, z, x0 - half, y0 + t, z, x0 + half, y0 + t, z); }
+    if (grid.length) g.add(this._fatLines(new Float32Array(grid), { rgb: toSRGB(this.colFg), width: 1, opacity: this.dark ? 0.2 : 0.14 }));
+    const b = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, c]) => [x0 + a * half, y0 + c * half, z]), edge = [];
+    for (let i = 0; i < 4; i++) edge.push(...b[i], ...b[(i + 1) % 4]);
+    g.add(this._fatLines(new Float32Array(edge), { rgb: toSRGB(this.colFg), width: 1.5, opacity: 0.5 }));
+    this._setLayer('floor', g);
+    this.floorGrid = step;
   }
 
   // --- overlays: loads, anchors, selection, probes ------------------------------------------------------------------

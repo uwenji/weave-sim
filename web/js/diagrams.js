@@ -153,9 +153,12 @@ function contactForces(ctx, out) {
 
 function reactions(ctx, out) {
   const { st, results: r, opts, P } = ctx;
-  if (!r.reactions || !r.reactions.size) { out.info = 'reactions: none (no anchors)'; return; }
+  const fl = r.floor && r.floor.nodes ? r.floor : null;              // the ground's forces on the nodes that rest on it
+  if ((!r.reactions || !r.reactions.size) && !fl) { out.info = r.floor ? 'reactions: none (no anchors, nothing on the ground)' : 'reactions: none (no anchors)'; return; }
   const rows = [];
-  for (const [fk, v] of r.reactions) { const i = st.nodeFrameIds.get(fk); if (i === undefined) continue; rows.push({ i, F: [v[0], v[1], v[2]], mag: Math.hypot(v[0], v[1], v[2]) }); }
+  for (const [fk, v] of r.reactions || []) { const i = st.nodeFrameIds.get(fk); if (i === undefined) continue; rows.push({ i, F: [v[0], v[1], v[2]], mag: Math.hypot(v[0], v[1], v[2]) }); }
+  const nAnch = rows.length;
+  if (fl) for (let i = 0; i < st.n; i++) if (fl.state[i]) { const F = [fl.F[3 * i], fl.F[3 * i + 1], fl.F[3 * i + 2]]; rows.push({ i, F, mag: Math.hypot(...F) }); }
   let mmax = 0, ib = 0; rows.forEach((q, k) => { if (q.mag > mmax) { mmax = q.mag; ib = k; } });
   if (!(mmax > 0)) { out.info = 'reactions: all zero'; return; }
   const L = HEIGHT_FRACTION * ctx.size / mmax * opts.scale, from = [], vec = [];
@@ -164,7 +167,8 @@ function reactions(ctx, out) {
   out.arrows = { from: Float32Array.from(from), vec: Float32Array.from(vec), color: ANCHOR_FULL };
   if (opts.labels === 2) out.labels = rows.map(q => ({ p: tail(q), text: fmtG(q.mag, 4) }));
   else if (opts.labels === 1) out.labels = [{ p: tail(rows[ib]), text: `${fmtG(rows[ib].mag, 4)} ${diagramUnit(ctx.units, 'R')}` }];
-  const tot = [0, 0, 0]; for (const q of rows) for (let c = 0; c < 3; c++) tot[c] += q.F[c];
-  out.info = `reactions  max ${fmtG(mmax, 4)} ${diagramUnit(ctx.units, 'R')}  ·  ΣR = (${tot.map(t => fmtG(t, 4)).join(', ')})`;
+  const tot = [0, 0, 0]; rows.slice(0, nAnch).forEach(q => { for (let c = 0; c < 3; c++) tot[c] += q.F[c]; });
+  out.info = `reactions  max ${fmtG(mmax, 4)} ${diagramUnit(ctx.units, 'R')}` + (nAnch ? `  ·  ΣR = (${tot.map(t => fmtG(t, 4)).join(', ')})` : '')
+    + (fl ? `  ·  ground Σ = (${fl.sum.map(t => fmtG(t, 4)).join(', ')}) on ${fl.nodes} node${fl.nodes === 1 ? '' : 's'}${fl.slipping ? `, ${fl.slipping} sliding` : ''}` : '');
 }
 

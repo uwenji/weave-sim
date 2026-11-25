@@ -4,11 +4,14 @@
 // download() copies the GPU state back into it, so CpuSolver.results() / rebuildGoals() / step() work on the GPU state.
 // The kernels run the algorithm of CpuSolver.step with the Cosserat rod of rod_cosserat.js (node positions, a full
 // rotation and a 3-axis body angular velocity per segment, clamp joints for the rotation anchors) — four dispatches per
-// iteration; see wgsl.js for the kernels and the precision scheme.
+// iteration, six when an instance has a ground (scene.floor: the Floor goal of solver_cpu.js with its rigid-body
+// freedoms — k_floor and k_rb); see wgsl.js for the kernels and the precision scheme.
 import { solverWGSL } from './wgsl.js';
-import { PolylineContact, AL_FREE_MIN } from './solver_cpu.js';
+import { PolylineContact, AL_FREE_MIN, Floor, RB_MASS, RB_LEVER } from './solver_cpu.js';
 
-const WG = 64, HN = 4096, HS = 9, NOUT = 64, NCT = 36, NIP = 108;
+// NCT / NIP: words of the control (CT) and parameter (IP) structs of wgsl.js; PSTR: floats per partial-reduction entry
+// (sum, max and three more sums for the ground kernel), NSLOT kernels with a reduction
+const WG = 64, HN = 4096, HS = 9, NOUT = 64, NCT = 56, NIP = 124, PSTR = 20, NSLOT = 4;
 const TWO32 = 4294967296;
 
 export async function getDevice() {
@@ -71,27 +74,29 @@ export class GpuSolver {
     // ---- layout
     const L = { N, M, P, C, K, HN, HS, NOUT };
     L.NWG_P = Math.ceil((M + N) / WG); L.NWG_F = Math.ceil((P + C + K) / WG); L.NWG_I = Math.ceil((N + M) / WG);
-    L.NWG = Math.max(1, L.NWG_P, L.NWG_F, L.NWG_I);
+    L.NWG_G = Math.max(1, Math.ceil(N / WG));                       // the ground kernel: one item per node
+    L.NWG = Math.max(1, L.NWG_P, L.NWG_F, L.NWG_I, L.NWG_G);
+    L.PSTR = PSTR; L.NSLOT = NSLOT;
     const alloc = (obj, spec) => { let o = 0; const off = {}; for (const [k, n] of spec) { off[k] = o; o += Math.max(n, 0); } obj.size = Math.max(o, 4); return off; };
     L.t = alloc(L.tS = {}, [['seg0', M], ['seg1', M], ['j0', P], ['j1', P], ['cs', C], ['nsa', N], ['nsb', N], ['koff', 2 * K], ['knseg', 2 * K], ['ken', K], ['l0i', 2 * M]]);
-    L.g = alloc(L.gS = {}, [['l0', M], ['jlen', P], ['clen', C], ['wk', 2 * K], ['hk', 2 * K], ['kw', K], ['kh', K],
+    L.g = alloc(L.gS = {}, [['l0', M], ['jlen', P], ['clen', C], ['wk', 2 * K], ['hk', 2 * K], ['kw', K], ['kh', K], ['nw', N], ['nh', N],
       ['stiff', B * M * 5], ['om', B * P * 3], ['mass', B * N], ['krot', B * M * 3], ['lc', B * N * 3], ['ll', B * N * 3], ['cb', B * C * 3],
       ['fc90', B * K * 2], ['e90', B * K * 2], ['hs', B * K * 2]]);
     L.i = alloc(L.iS = {}, [['x', B * N * 6], ['xp', B * N * 6], ['x0', B * N * 6], ['u', B * K * 4], ['slip', B * K * 2], ['fix', B * N], ['lock', B * K], ['kout', B * K], ['probe0', B * 6],
-      ['q', B * M * 8], ['qp', B * M * 8], ['q0', B * M * 8], ['cq', B * C * 8]]);
+      ['q', B * M * 8], ['qp', B * M * 8], ['q0', B * M * 8], ['cq', B * C * 8], ['fa', B * N * 4]]);   // fa: stick points of the ground (x, y)
     L.f = alloc(L.fS = {}, [['v', B * N * 3], ['w', B * M * 3], ['nprev', B * K * 3], ['lam', B * K], ['th0', B * K], ['rslip', B * K],
       ['dent', B * K * 2], ['dente', B * K], ['climb', B * K * 2], ['tanpsi', B * K * 2], ['fn', B * K], ['ft', B * K], ['gap', B * K], ['phi', B * K * 2], ['theta', B * K],
       ['anom', B * K], ['pres', B * K], ['util', B * K], ['mrot', B * K], ['mid', B * K * 3], ['nax', B * M], ['vsh', B * M * 2], ['mj', B * P * 3], ['cm', B * C * 2], ['react', B * N * 3],
       ['lseg', B * M], ['r', B * M * 9], ['tn', B * N * 3], ['qn', B * N * 4],
-      ['penacc', B * K], ['hist', B * HN * HS], ['out', B * NOUT * 4]]);
-    L.a = alloc(L.aS = {}, [['f', B * N * 6], ['t', B * M * 6], ['k', B * M * 2]]);
+      ['penacc', B * K], ['hist', B * HN * HS], ['out', B * NOUT * 4], ['ffl', B * N * 4]]);   // ffl: the ground's force on every node + its state
+    L.a = alloc(L.aS = {}, [['f', B * N * 6], ['t', B * M * 6], ['k', B * M * 2], ['kr', B * M * 6]]);   // kr: bending-coupling stiffness per body axis
     this.L = L;
     // ---- buffers
     const SU = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const mk = (words, label) => device.createBuffer({ size: Math.max(16, words * 4), usage: SU, label });
     this.bTopo = mk(L.tS.size, 'topo'); this.bGeo = mk(L.gS.size, 'geo'); this.bIp = mk(B * NIP, 'ip');
     this.bIst = mk(L.iS.size, 'ist'); this.bFst = mk(L.fS.size, 'fst'); this.bAcc = mk(L.aS.size, 'acc');
-    this.bPart = mk(B * 3 * L.NWG * 8, 'part'); this.bCtl = mk(B * NCT, 'ctl');
+    this.bPart = mk(B * NSLOT * L.NWG * PSTR, 'part'); this.bCtl = mk(B * NCT, 'ctl');
     this.geo = new Float32Array(L.gS.size); this.ipArr = new ArrayBuffer(B * NIP * 4);
     this._uploadTopo();
     // ---- pipelines (cached per device and source)
@@ -104,7 +109,7 @@ export class GpuSolver {
       const layout = device.createBindGroupLayout({ entries: ['read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'storage'].map((t, i) => ({ binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: t } })) });
       const pl = device.createPipelineLayout({ bindGroupLayouts: [layout] });
       const pipes = {};
-      for (const e of ['k_prep', 'k_force', 'k_int', 'k_ctrl']) pipes[e] = device.createComputePipeline({ layout: pl, compute: { module, entryPoint: e }, label: e });
+      for (const e of ['k_prep', 'k_force', 'k_floor', 'k_rb', 'k_int', 'k_ctrl']) pipes[e] = device.createComputePipeline({ layout: pl, compute: { module, entryPoint: e }, label: e });
       ent = { module, layout, pipes };
       cache.set(this.code, ent);
       if (cache.size > 8) cache.delete(cache.keys().next().value);
@@ -133,6 +138,7 @@ export class GpuSolver {
       for (const v of md.stiff.EA) EA = Math.max(EA, v); for (const v of md.stiff.EIx) EI = Math.max(EI, v); for (const v of md.stiff.EIy) EI = Math.max(EI, v); for (const v of md.stiff.GJ) GJ = Math.max(GJ, v);
       kp = Math.max(kp, md.scene.contact.strength, md.scene.contact.stick_strength);
       if (md.contact) { for (const v of md.contact.hk) h = Math.max(h, v); for (const v of md.contact.wk) w = Math.max(w, v); }
+      if (md.floor) { for (const v of md.floor.h) h = Math.max(h, v); for (const v of md.floor.w) w = Math.max(w, v); }   // the ground's penalty: up to a section deep
       let s = 0; for (const v of md.loads.const) s += Math.abs(v);
       if (md.protocol && md.protocol.mode === 1) { let f = 0; for (const v of md.protocol.sched) f = Math.max(f, Math.abs(v)); s += f; }
       Lsum = Math.max(Lsum, s);
@@ -209,6 +215,30 @@ export class GpuSolver {
     if (md.protocol && md.protocol.mode === 2) fx[md.protocol.probe] = 15;
     this._wI(L.i.fix + b * N, fx);
     if (K && md.contact) this._wI(L.i.lock + b * K, Uint32Array.from(md.contact.locked));
+    if (md.floor) for (let n = 0; n < N; n++) { G[g.nw + n] = md.floor.w[n]; G[g.nh + n] = md.floor.h[n]; }   // node sections (shared by the batch, as wk / hk)
+  }
+
+  /** the rigid-body freedoms of instance b are on: a ground, no anchor of any kind, no pinned probe */
+  _rigid(b) {
+    const md = this.models[b];
+    return !!md.floor && md.anchors.fixedNodes.length === 0 && md.anchors.rotClamps.length === 0 && !(md.protocol && md.protocol.mode === 2);
+  }
+  /** the ground's stick points of instance b (state of the Floor goal), its rigid velocities and the reference point
+   *  of the rigid rotation (the centroid of the nodes), host → device */
+  _uploadFloor(b) {
+    const md = this.models[b], fl = md.floor, { N } = this.sizes, PB = this.PB;
+    const w = new Uint32Array(N * 4);
+    for (let n = 0; n < N; n++) {
+      const x = toI64(fl ? fl.ax[n] : md.st.X[3 * n], PB), y = toI64(fl ? fl.ay[n] : md.st.X[3 * n + 1], PB);
+      w[4 * n] = x[0]; w[4 * n + 1] = x[1]; w[4 * n + 2] = y[0]; w[4 * n + 3] = y[1];
+    }
+    this._wI(this.L.i.fa + b * N * 4, w);
+    const rv = new Float32Array(8); if (fl) { rv.set(fl.rv, 0); rv.set(fl.rw, 4); }
+    this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 36) * 4, rv);
+    const c = [0, 0, 0], X = md.st.X; for (let n = 0; n < N; n++) for (let k = 0; k < 3; k++) c[k] += X[3 * n + k] / Math.max(N, 1);
+    const cw = new Uint32Array(6); c.forEach((v, k) => { const [lo, hi] = toI64(v, PB); cw[2 * k] = lo; cw[2 * k + 1] = hi; });
+    this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 50) * 4, cw);
+    if (fl) fl.fresh = false;
   }
 
   _uploadParams(b) {
@@ -228,6 +258,13 @@ export class GpuSolver {
     u(36, pr ? pr.avg : 0); u(37, 0); u(38, 0); u(39, 0);
     f(40, pr ? pr.axis[0] : 0); f(41, pr ? pr.axis[1] : 0); f(42, pr ? pr.axis[2] : -1); f(43, pr ? pr.kPad || 0 : 0);
     for (let i = 0; i < 64; i++) f(44 + i, pr && i < pr.sched.length ? pr.sched[i] : 0);
+    // the ground (scene.floor) and the rigid-body freedoms of an unanchored model (Floor in solver_cpu.js)
+    const fl = md.floor, rigid = this._rigid(b);
+    const z64 = toI64(fl ? +fl.p.z : 0, this.PB);
+    u(108, fl ? 1 : 0); f(109, fl ? Math.max(+fl.p.mu || 0, 0) : 0); u(110, z64[0]); u(111, z64[1]);
+    u(112, rigid ? 1 : 0); f(113, fl ? fl.vmax : 0); f(114, fl ? fl.wmax : 0); f(115, fl ? fl.Rb : 1);
+    for (let k = 116; k < 122; k++) u(k, 0);
+    f(122, RB_MASS); f(123, fl ? (RB_LEVER * fl.Rb) ** 2 : 0);
     this.dev.queue.writeBuffer(this.bIp, b * NIP * 4, this.ipArr, b * NIP * 4, NIP * 4);
   }
 
@@ -266,6 +303,7 @@ export class GpuSolver {
     if (pr && pr.mode === 1) { dv.setFloat32(80, pr.axis[0] * pr.sched[0], true); dv.setFloat32(84, pr.axis[1] * pr.sched[0], true); dv.setFloat32(88, pr.axis[2] * pr.sched[0], true); dv.setFloat32(92, pr.sched[0], true); }
     if (pr && pr.mode === 2) dv.setFloat32(92, pr.sched[0], true);
     this.dev.queue.writeBuffer(this.bCtl, b * NCT * 4, ct);
+    this._uploadFloor(b);
     this.ctlHost[b] = { iter: st.iteration, done: 0, rollback: 0, resid: st.residual };
     this.histRead[b] = 0;
     if (pr && pr.mode === 2 && pr.sched.length) this._placeProbe(b, pr.sched[0]);
@@ -288,6 +326,7 @@ export class GpuSolver {
     this._writeGoals(b);
     this.dev.queue.writeBuffer(this.bGeo, 0, this.geo);
     this._uploadParams(b);
+    if (md.floor && md.floor.fresh) this._uploadFloor(b);          // a ground switched on by this edit: its stick points start at the nodes
     // a rebuild resets the kinetic-energy peak and the convergence flag (Solver.rebuild_goals)
     this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 4) * 4, new Float32Array([0]));
     this.dev.queue.writeBuffer(this.bCtl, (b * NCT + 1) * 4, new Uint32Array([0]));
@@ -305,7 +344,9 @@ export class GpuSolver {
       if (opts.force !== false) dev.queue.writeBuffer(this.bCtl, (b * NCT + 1) * 4, new Uint32Array([0]));
     }
     const L = this.L;
-    const groups = [['k_prep', L.NWG_P], ['k_force', L.NWG_F], ['k_int', L.NWG_I], ['k_ctrl', 1]];
+    const ground = this.models.some(md => md.floor);                // k_floor (forces, stick points, sums) and k_rb (rigid-body velocities)
+    const groups = ground ? [['k_prep', L.NWG_P], ['k_force', L.NWG_F], ['k_floor', L.NWG_G], ['k_rb', 1], ['k_int', L.NWG_I], ['k_ctrl', 1]]
+      : [['k_prep', L.NWG_P], ['k_force', L.NWG_F], ['k_int', L.NWG_I], ['k_ctrl', 1]];
     let left = nIter;
     while (left > 0) {
       const k = Math.min(this.perSubmit, left); left -= k;
@@ -337,7 +378,8 @@ export class GpuSolver {
       const o = b * NCT * 4, U = (w) => dv.getUint32(o + 4 * w, true), F = (w) => dv.getFloat32(o + 4 * w, true);
       const c = { iter: U(0), done: U(1), rollback: U(2), alUpdate: U(3), kePrev: F(4), ke: F(5), resid: F(6) >= 1e38 ? Infinity : F(6), fref: F(7),
         eStretch: F(8), eBend: F(9), eTors: F(10), eCont: F(11), stopAt: U(12), histN: U(13), phase: U(14), inc: U(15),
-        eShear: F(18), resT: F(19), resF: F(32) };
+        eShear: F(18), resT: F(19), resF: F(32), eFloor: F(33), fnFloor: F(34), resRb: F(35), rv: [F(36), F(37), F(38)], rw: [F(40), F(41), F(42)],
+        rc: [fromI64(U(50), U(51), this.PB), fromI64(U(52), U(53), this.PB), fromI64(U(54), U(55), this.PB)] };
       this.ctlHost[b] = c; out.push(c);
     }
     return out;
@@ -408,7 +450,17 @@ export class GpuSolver {
     for (let i = 0; i < 3 * N; i++) md.anchors.reactions[i] = fBuf[L.f.react + b * N * 3 + i];
     rod.energyParts = { bending: c.eBend, torsion: c.eTors, stretch: c.eStretch, shear: c.eShear };
     rod.energy = c.eStretch + c.eShear + c.eBend + c.eTors;
-    md.residualParts = { force: c.resF, torque: c.resT };
+    md.residualParts = { force: c.resF, torque: c.resT, rigid: md.floor && this._rigid(b) ? c.resRb : 0 };
+    if (md.floor) {                                                 // the ground: forces, contact state, stick points, rigid velocities
+      const fl = md.floor, of = L.f.ffl + b * N * 4, oa = L.i.fa + b * N * 4;
+      for (let n = 0; n < N; n++) {
+        fl.F[3 * n] = fBuf[of + 4 * n]; fl.F[3 * n + 1] = fBuf[of + 4 * n + 1]; fl.F[3 * n + 2] = fBuf[of + 4 * n + 2]; fl.state[n] = fBuf[of + 4 * n + 3] | 0;
+        fl.ax[n] = fromI64(iBuf[oa + 4 * n], iBuf[oa + 4 * n + 1], PB); fl.ay[n] = fromI64(iBuf[oa + 4 * n + 2], iBuf[oa + 4 * n + 3], PB);
+      }
+      fl.energy = c.eFloor; fl.FnMax = c.fnFloor;
+      for (let k = 0; k < 3; k++) { fl.rv[k] = c.rv[k]; fl.rw[k] = c.rw[k]; fl.c[k] = c.rc[k]; }
+      fl.ramp = Floor.rampAt(Math.max(c.iter - 1, 0), Math.max(md.scene.contact.ramp_iter | 0, 0));
+    }
     if (K && md.contact) {
       const ct = md.contact;
       for (let k = 0; k < 2 * K; k++) { const o = L.i.u + b * K * 4 + 2 * k; st.u[k] = iBuf[o + 1] >= 0x80000000 ? 0 : iBuf[o + 1] + iBuf[o] / TWO32; }
@@ -437,9 +489,11 @@ export class GpuSolver {
       // the ramp of the last iteration and the frame inertia it used (CpuSolver.step: static + contact righting share)
       const last = Math.max(c.iter - 1, 0);
       ct.ramp = rampN === 0 ? 1.0 : Math.min(1.0, 0.01 + 0.99 * last / rampN);
-      const kTw = new Float64Array(M); ct.addTwistStiffness(st, kTw);
-      const ms = md.scene.solver.mass_scale;
-      for (let j = 0; j < M; j++) for (let k = 0; k < 3; k++) md.inertia3[3 * j + k] = ms * Math.max(md.kRotStatic[3 * j + k] + kTw[j], 1e-12);
+    }
+    {                                                               // frame inertia: static + contact righting share + bending coupling (CpuSolver.step)
+      const kTw = new Float64Array(M); if (K && md.contact) md.contact.addTwistStiffness(st, kTw);
+      const ms = md.scene.solver.mass_scale, kD = rod.updateBendCoupling(st);
+      for (let j = 0; j < M; j++) for (let k = 0; k < 3; k++) md.inertia3[3 * j + k] = ms * Math.max(md.kRotStatic[3 * j + k] + kTw[j] + kD[3 * j + k], 1e-12);
     }
     st.iteration = c.iter; st.residual = c.resid; md.kePrev = c.kePrev;
     md.converged = c.done === 1 && c.resid <= md.scene.solver.tol;

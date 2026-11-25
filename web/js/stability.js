@@ -27,12 +27,14 @@ function makeEvaluator(sv, dofs) {
   const st = sv.st, n = st.n, m = st.m;
   const F = new Float64Array(3 * n), T = new Float64Array(3 * m), R = new Float64Array(9);
   // every typed array of the state and of the contact goal is restored after an evaluation (bookmarks, slips, dents …)
-  const holders = [st, sv.contact].filter(Boolean);
+  const holders = [st, sv.contact, sv.floor].filter(Boolean);     // the ground's stick points are restored too
   const saved = holders.map(h => Object.entries(h).filter(([, v]) => ArrayBuffer.isView(v) && !(v instanceof DataView)).map(([k, v]) => [k, v.slice()]));
   const scalars = sv.contact ? { penN: sv.contact.penN, energy: sv.contact.energy, rotEnergy: sv.contact.rotEnergy } : null;
+  const fscalars = sv.floor ? { energy: sv.floor.energy, FnMax: sv.floor.FnMax, ramp: sv.floor.ramp } : null;
   const restore = () => {
     holders.forEach((h, hi) => { for (const [k, v] of saved[hi]) h[k].set(v); });
     if (scalars) Object.assign(sv.contact, scalars);
+    if (fscalars) Object.assign(sv.floor, fscalars);
   };
   const g = new Float64Array(dofs.length);
   const evaluate = () => {
@@ -40,6 +42,7 @@ function makeEvaluator(sv, dofs) {
     sv.beam.apply(st, F, T);
     const L = sv.loads; for (let i = 0; i < 3 * n; i++) F[i] += L.const[i];
     if (sv.contact) sv.contact.apply(st, F, T);
+    if (sv.floor) sv.floor.apply(st, F);                           // the ground, at the ramp of the last iteration
     for (let d = 0; d < dofs.length; d++) {
       const q = dofs[d];
       if (q.kind === 0) g[d] = F[3 * q.i + q.k];

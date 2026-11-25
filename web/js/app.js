@@ -9,9 +9,9 @@ import { Scene, selectorLabel, fixLabel } from './scene.js';
 import { Mesh } from './mesh.js';
 import { buildTopology, fkey, fsplit, overFrame, underFrame } from './topology.js';
 import { UnitSystem } from './units.js';
-import { CpuSolver } from './solver_cpu.js';
+import { CpuSolver, Floor } from './solver_cpu.js';
 import { GpuSolver, getDevice } from './solver_gpu.js';
-import { resolveSelector, anchorMasks, nodeQuats } from './model.js';
+import { resolveSelector, anchorMasks, nodeQuats, nodeFrames } from './model.js';
 import { toFrame } from './quat.js';
 import { View } from './view.js';
 import { initDisplay, LAYER_LABEL, SEG_LAYERS, KNOT_LAYERS } from './display_ui.js';
@@ -169,7 +169,7 @@ async function exclusive(fn) { await waitIdle(); A.busy = true; try { return awa
 function goalSignature() {
   const sc = A.scene; if (!sc) return '';
   const c = { ...sc.contact }; delete c.locked;
-  return JSON.stringify({ loads: sc.loads, anchors: sc.anchors, material: sc.material, section: sc.section, beam: sc.beam, contact: c, hybrid: sc.hybrid, joints: sc.hasPieceGroups ? sc.joints : null, mass_scale: sc.solver.mass_scale, prestress: sc.solver.prestress });
+  return JSON.stringify({ loads: sc.loads, anchors: sc.anchors, material: sc.material, section: sc.section, beam: sc.beam, contact: c, hybrid: sc.hybrid, joints: sc.hasPieceGroups ? sc.joints : null, mass_scale: sc.solver.mass_scale, prestress: sc.solver.prestress, floor: sc.floor });
 }
 function paramSignature() { const sc = A.scene; return sc ? JSON.stringify({ solver: sc.solver, contact: sc.contact }) : ''; }
 
@@ -263,7 +263,7 @@ function afterSteps() {
   recordProbe();
   recordKnots();
   A.dirty.results = true;
-  mon.schedule(); updateStatus();
+  mon.schedule(); updateStatus(); updateFloorReadout();
 }
 function finishRun() {
   recordKnots(true); refreshResults(); if (display.hasJoints()) display.refreshJoints(); drawChart(); updateStatus(); updateResetTitle();
@@ -338,6 +338,20 @@ function updateExtremes() {
   rows.push(`|disp| max ${fmt(dmax)} ${u.length}`);
   rows.push(`energy  bending ${fmt(r.energies.bending)}  torsion ${fmt(r.energies.torsion)}  stretch ${fmt(r.energies.stretch)}  contact ${fmt(r.energies.contact)}`);
   if (r.reactions.size) { let s = [0, 0, 0]; for (const v of r.reactions.values()) for (let c = 0; c < 3; c++) s[c] += v[c]; rows.push(`Σ reactions (${s.map(v => fmt(v, 3)).join(', ')}) ${u.force}`); }
+  if (r.floor) rows.push(`Σ ground    (${r.floor.sum.map(v => fmt(v, 3)).join(', ')}) ${u.force} · ${r.floor.nodes} node${r.floor.nodes === 1 ? '' : 's'} on it${r.floor.slipping ? `, ${r.floor.slipping} sliding` : ''}`);
+  // do the supports balance the loads? The nodal residual can be under the tolerance while they do not: a resultant
+  // spread over thousands of nodes is small at every one of them (a slow whole-model mode that has not come to rest)
+  if (A.model && (r.reactions.size || r.floor)) {
+    const st = A.model.st, Ld = A.model.loads, L = [0, 0, 0];
+    for (let i = 0; i < Ld.const.length; i++) L[i % 3] += Ld.const[i];
+    if (Ld.pointLocal.length) { const nq = nodeQuats(st); for (const [nid, Fv] of Ld.pointLocal) { const fr = toFrame(nq, 4 * nid); for (let c = 0; c < 3; c++) L[c] += fr[c] * Fv[0] + fr[3 + c] * Fv[1] + fr[6 + c] * Fv[2]; } }
+    const un = L.slice();
+    for (const v of r.reactions.values()) for (let c = 0; c < 3; c++) un[c] += v[c];
+    if (r.floor) for (let c = 0; c < 3; c++) un[c] += r.floor.sum[c];
+    const lm = Math.hypot(...L), um = Math.hypot(...un);
+    rows.push(`Σ loads     (${L.map(v => fmt(v, 3)).join(', ')}) ${u.force}`);
+    rows.push(`unbalanced  (${un.map(v => fmt(v, 3)).join(', ')}) ${u.force}${lm > 0 ? ` = ${fmt(100 * um / lm, 3)} % of the loads` : ''}${lm > 0 && um > 0.05 * lm ? ' — the supports do not balance the loads' : ''}`);
+  }
   $('ro-extremes').textContent = rows.join('\n');
   $('sum-results').textContent = `${r.iterations} it${r.converged ? ' · converged' : ''}`;
 }
@@ -359,7 +373,14 @@ function resultsJSON() {
     const pieces = {}; for (const [s, list] of Object.entries(J)) if (list && list.length) pieces[s] = Array.from({ length: list.length + 1 }, (_, p) => A.scene.pieceGroup(+s, p));
     joints = { params: A.scene.discretize, by_strand: J, points: pts, piece_groups: pieces };
   }
-  return { iterations: r.iterations, converged: r.converged, note: `WeaveSim Web (${A.backend})`, energies: r.energies, segment: seg, knot, node: { disp }, reactions, ...(joints ? { joints } : {}), units: A.scene.units.toJSON(), topology: { strands: topo.nStrands, knots: topo.nKnots } };
+  // the ground, when there is one: the plane, and its force on every node that rests on it
+  let floor = null;
+  if (r.floor) {
+    const contacts = [];
+    for (let i = 0; i < st.n; i++) if (r.floor.state[i]) { const s = st.nodeStrand[i]; contacts.push({ strand: s, node: i - st.nodeOffset[s], point: [st.X[3 * i], st.X[3 * i + 1], st.X[3 * i + 2]].map(v => +v.toFixed(4)), F: [r.floor.F[3 * i], r.floor.F[3 * i + 1], r.floor.F[3 * i + 2]], sliding: r.floor.state[i] === 2 }); }
+    floor = { z: r.floor.z, mu: r.floor.mu, nodes: r.floor.nodes, sliding: r.floor.slipping, resultant: r.floor.sum, contacts };
+  }
+  return { iterations: r.iterations, converged: r.converged, note: `WeaveSim Web (${A.backend})`, energies: r.energies, segment: seg, knot, node: { disp }, reactions, ...(floor ? { floor } : {}), ...(joints ? { joints } : {}), units: A.scene.units.toJSON(), topology: { strands: topo.nStrands, knots: topo.nKnots } };
 }
 
 // =========================================================================================================== overlays
@@ -383,6 +404,7 @@ function refreshOverlays(opts = {}) {
   if (pr) { const nid = frameNode(pr.frame[0], pr.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: pr.axis || [0, 0, -1], label: 'probe', color: cssv('--accent') }); }
   for (const p of calib?.probeMarkers?.() || []) { const nid = frameNode(p.frame[0], p.frame[1]); if (nid !== undefined) probes.push({ node: nid, axis: p.axis, label: p.label, color: p.color }); }
   view.setOverlays({ loads, anchors, selection, probes, knotMarks: knots ? knots.marks() : [], frames: view.visible.frames, arrowScale: +$('sl-arrow').value });
+  view.setFloor(sc.floor.enabled && sc.floor.z != null ? { z: +sc.floor.z } : null);
   updateSelectionReadouts(); if (!opts.keepLists) renderLists(); updateSummaries();
 }
 
@@ -631,6 +653,7 @@ function syncPanels() {
   const L = sc.loads;
   $('ck-grav').checked = L.gravity.enabled; ['gx', 'gy', 'gz'].forEach((k, i) => { $('nb-' + k).value = L.gravity.direction[i]; });
   $('ck-udl').checked = L.udl.enabled; ['qx', 'qy', 'qz'].forEach((k, i) => { $('nb-' + k).value = L.udl.q[i]; }); $('sel-udlper').value = L.udl.per;
+  syncFloorInputs();
   // utm
   if (probeOf(sc)) { const a = sc.utm.probe.axis || [0, 0, -1]; $('nb-ax').value = a[0]; $('nb-ay').value = a[1]; $('nb-az').value = a[2]; }
   $('sel-utmfu').value = sc.utm.units?.force || 'N'; $('sel-utmlu').value = sc.utm.units?.length || 'mm';
@@ -660,12 +683,40 @@ function updateSummaries() {
   $('sum-material').textContent = `${sc.units} · E ${fmt(sc.material.E, 3)} · ${fmt(sc.section.width, 4)}×${fmt(sc.section.height, 4)}${sc.hasPieceGroups ? ` · ${Object.keys(sc.hybrid.pieces).length} piece${Object.keys(sc.hybrid.pieces).length === 1 ? '' : 's'}` : ''}`;
   $('sum-contact').textContent = `μ ${fmt(sc.contact.mu, 3)} · k ${fmt(sc.contact.strength, 3)}${sc.contact.locked ? ' · locked' : ''}`;
   $('sum-loads').textContent = `${sc.loads.gravity.enabled ? 'gravity · ' : ''}${sc.loads.point.length} point`;
-  $('sum-anchors').textContent = `${sc.anchors.length} anchor${sc.anchors.length === 1 ? '' : 's'}`;
+  $('sum-anchors').textContent = `${sc.anchors.length} anchor${sc.anchors.length === 1 ? '' : 's'}${sc.floor.enabled && sc.floor.z != null ? ' · ground' : ''}`;
+  updateFloorReadout();
   $('sum-solve').textContent = A.backend === 'webgpu' ? 'WebGPU' : 'CPU f64';
   $('sum-utm').textContent = probeOf(sc) ? `probe (${sc.utm.probe.frame})` : '';
 }
 
 const numStr = (v) => (Number.isFinite(v) ? String(+(+v).toPrecision(6)) : '');
+
+// --- 6 Anchors › ground (scene.floor: the Floor goal of solver_cpu.js) --------------------------------------------------
+/** the lowest point of the laths as they are now: node height minus the half-extent of its section below the centreline */
+function lowestPoint() {
+  const st = A.model?.st, sc = A.scene; if (!st || !st.n) return null;
+  const R = nodeFrames(st), g = sc.nodeGroups(st); let lo = Infinity;
+  for (let i = 0; i < st.n; i++) { const s = sc.group(g[i]).section; lo = Math.min(lo, st.X[3 * i + 2] - Floor.clearance(+s.width, +s.height, R[9 * i + 2], R[9 * i + 5])); }
+  return Number.isFinite(lo) ? lo : null;
+}
+function syncFloorInputs() {
+  const fl = A.scene?.floor; if (!fl || !$('ck-floor')) return;
+  $('ck-floor').checked = !!fl.enabled && fl.z != null; $('nb-floorz').value = fl.z == null ? '' : numStr(+fl.z); $('nb-floormu').value = numStr(+fl.mu);
+  const lo = lowestPoint(); $('nb-floorz').placeholder = lo == null ? '' : numStr(lo);
+}
+/** what rests on the ground (the model's ground goal after the last steps), next to the loads it has to carry */
+function updateFloorReadout() {
+  const el = $('ro-floor'), sc = A.scene; if (!el || !sc) return;
+  const fl = sc.floor;
+  if (!fl.enabled || fl.z == null) { el.hidden = true; el.textContent = ''; return; }
+  el.hidden = false;
+  const g = A.model?.floor, u = sc.units;
+  if (!g) { el.textContent = `ground at Z ${fmt(+fl.z, 4)} ${u.length} · μ ${fmt(+fl.mu, 3)} — acts from the next Run / Step`; return; }
+  const s = g.summary(), An = A.model.anchors, free = An.fixedNodes.length === 0 && An.rotClamps.length === 0;
+  const Lc = A.model.loads.const, W = [0, 0, 0]; for (let i = 0; i < Lc.length; i++) W[i % 3] += Lc[i];
+  const v3 = (a) => `(${a.map(v => fmt(v, 4)).join(', ')})`;
+  el.textContent = `on the ground: ${s.nodes} node${s.nodes === 1 ? '' : 's'}${s.slipping ? ` (${s.slipping} sliding)` : ''} · ΣF ${v3(s.sum)} ${u.force}\nloads Σ ${v3(W)} ${u.force}${free ? ' · no anchors: the model is free to fall, slide and tip' : ''}`;
+}
 /** one point load as an editable row: the components in the load's space (world, or the frame axes X width / Y normal /
  *  Z tangent) and the magnitude, which rescales the vector */
 function loadRow(pl, i, u) {
@@ -790,6 +841,7 @@ async function readFileList(files) {
     const m = meshes[0], sc = A.scene ? Scene.fromJSON(A.scene.toJSON(), m.name.replace(/\.\w+$/, '')) : new Scene();
     sc.mesh = { path: m.name, scale: 1.0 }; sc.weave.flip_knots = []; sc.anchors = A.scene ? sc.anchors : [];
     sc.joints = {}; sc.hybrid.pieces = {};                            // joints and piece groups belong to the previous mesh's strands
+    sc.floor = { enabled: false, z: null, mu: sc.floor.mu };          // and the ground's height to its geometry
     if (!A.scene) { sc.addAnchor({ type: 'all_start' }, [1, 1, 1, 0, 0, 0], 'starts'); sc.addAnchor({ type: 'all_end' }, [1, 1, 1, 0, 0, 0], 'ends'); }
     sc.name = m.name.replace(/\.\w+$/, '');
     setScene(sc, new Uint8Array(await m.arrayBuffer()), m.name);
@@ -901,9 +953,15 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+/** 'light' | 'dark' | 'auto' (the system's). The switch in the top bar shows the theme in effect; the first click on
+ *  it fixes one (the Theory page shares the stored key and can set it back to auto). */
+const sysDark = window.matchMedia('(prefers-color-scheme: dark)');
+let themeNow = 'auto';
+const isDark = () => (themeNow === 'auto' ? sysDark.matches : themeNow === 'dark');
 function setTheme(t) {
+  t = t === 'light' || t === 'dark' ? t : 'auto'; themeNow = t;
   if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
-  qsa('#theme-chips .chip').forEach(c => c.classList.toggle('on', c.dataset.theme === t));
+  $('theme-switch').setAttribute('aria-checked', String(isDark()));
   store.set('theme', t);
   view.applyTheme(); knots?.renderChips(); drawChart(); calib?.redraw?.(); display?.applyColouring(); refreshOverlays();
 }
@@ -1079,6 +1137,22 @@ function bindPanels() {
     if (t.dataset.delAnchor != null) { A.scene.anchors.splice(+t.dataset.delAnchor, 1); refreshOverlays(); onSceneEdited(); }
     else if (t.dataset.selAnchor != null) select(resolveSelector(A.scene.anchors[+t.dataset.selAnchor].select, A.topo));
   };
+  // ground: a goal edit like the anchors — applied to the running state at the next Run / Step
+  const floorEdit = (msg) => { syncFloorInputs(); refreshOverlays({ keepLists: true }); onSceneEdited(); if (msg) status(msg); };
+  const floorSays = () => { const fl = A.scene.floor, u = A.scene.units; return `ground at Z ${fmt(+fl.z, 4)} ${u.length}, μ ${fmt(+fl.mu, 3)}${A.scene.anchors.length ? '' : ' — no anchors: the model is free to fall, slide and tip as a whole'}`; };
+  $('ck-floor').onchange = () => {
+    const fl = A.scene.floor; fl.enabled = $('ck-floor').checked;
+    if (fl.enabled && fl.z == null) fl.z = lowestPoint();              // first time: under the laths as they are
+    if (fl.z == null) fl.enabled = false;
+    floorEdit(fl.enabled ? floorSays() : 'ground off');
+  };
+  $('nb-floorz').onchange = () => {
+    const fl = A.scene.floor, t = $('nb-floorz').value;
+    if (t === '' || !Number.isFinite(+t)) { fl.z = null; fl.enabled = false; floorEdit('ground off (no height)'); return; }
+    fl.z = +t; floorEdit(fl.enabled ? floorSays() : `ground height ${fmt(fl.z, 4)} ${A.scene.units.length} (tick “on” to use it)`);
+  };
+  $('nb-floormu').onchange = () => { const fl = A.scene.floor, v = +$('nb-floormu').value; if (Number.isFinite(v) && v >= 0) fl.mu = v; floorEdit(fl.enabled && fl.z != null ? floorSays() : ''); };
+  $('btn-floorlow').onclick = () => { const z = lowestPoint(); if (z == null) return; A.scene.floor.z = z; floorEdit(A.scene.floor.enabled ? floorSays() : `ground height at the lowest point of the laths: ${fmt(z, 4)} ${A.scene.units.length} (tick “on” to use it)`); };
   // solve
   qsa('#backend-chips .chip').forEach(c => { c.onclick = () => { store.set('backend', c.dataset.backend); setBackend(c.dataset.backend); }; });
   $('btn-polish').onclick = polish;
@@ -1093,8 +1167,8 @@ function bindPanels() {
   ['sel-utmforce', 'sel-utmdisp', 'sel-utmfu', 'sel-utmlu'].forEach(id => $(id).addEventListener('change', parseUtm));
   $('btn-replay').onclick = runReplay; $('btn-replay-stop').onclick = () => replayAbort?.abort();
   // view
-  qsa('#theme-chips .chip').forEach(c => { c.onclick = () => setTheme(c.dataset.theme); });
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { view.applyTheme(); knots?.renderChips(); drawChart(); });
+  $('theme-switch').addEventListener('click', () => setTheme(isDark() ? 'light' : 'dark'));
+  sysDark.addEventListener('change', () => { $('theme-switch').setAttribute('aria-checked', String(isDark())); view.applyTheme(); knots?.renderChips(); drawChart(); });
   qsa('#layer-chips .chip').forEach(c => { c.onclick = () => { c.classList.toggle('on'); view.setVisible(c.dataset.layer, c.classList.contains('on')); if (c.dataset.layer === 'frames') refreshOverlays(); }; });
   $('sl-deform').oninput = (e) => { $('out-deform').textContent = e.target.value; view.setDeform(+e.target.value); display.refreshJoints(); display.refreshDiagram(); };
   $('sl-arrow').oninput = (e) => { $('out-arrow').textContent = (+e.target.value).toFixed(1); refreshOverlays(); };
